@@ -51,7 +51,7 @@ search_fields = ["clicks","ctr","impressions","position"]
 target_site_url="https://vinepair.com/"
 
 #start and end dates as mm-dd-yy (does not include last day)
-start_date = "10-01-18"
+start_date = "11-09-18"
 end_date   = "09-25-19"
 
 #instantiate classes
@@ -95,6 +95,9 @@ def main():
             pv_df = ingest.get_pageviews(ga_service,view_id,field,start_str,end_str)
             for idx,row in pv_df.iterrows():
                 slug = row["slug"]
+                if slug=="null":
+                    continue
+
                 pindex = pindex_lookup.get(slug,-1)
                 count = float(row["ga:"+field])
                 if pindex > 0:
@@ -107,18 +110,23 @@ def main():
         ev_df = ingest.get_events(ga_service,view_id,start_str,end_str)
         for idx,row in ev_df.iterrows():
             slug = row["slug"]
+            if slug=="null":
+                continue
+
             pindex = pindex_lookup.get(slug,-1)
             count = float(row["scroll_events"])
             if pindex > 0:
                 record = Pagedata(pindex=pindex,key="scroll_events",count=count,date=sql_timestr)
                 write_session.add(record)
         write_session.commit()
-        time.sleep(10) # slow down API queries
+        time.sleep(61) # slow down API queries
         sc_df = ingest.get_searchdata(sc_service,target_site_url,"page",start_str)
         for field in search_fields:
             print "Fetching data for:",field,start_str
             for idx,row in sc_df.iterrows():
                 slug = row["slug"]
+                if slug=="null":
+                    continue
                 pindex = pindex_lookup.get(slug,-1)
                 count = float(row[field])
                 if pindex > 0:

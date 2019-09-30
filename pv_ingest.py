@@ -3,9 +3,8 @@ import pandas as pd
 from googleapiclient import discovery
 from apiclient.discovery import build
 from googleapiclient.http import build_http
+from oauth2client.service_account import ServiceAccountCredentials
 import httplib2
-import unicodedata
-
 
 class Ingest:
     """
@@ -14,7 +13,17 @@ class Ingest:
     """
     def __init__(self):
         self.util = Utils()
-
+        # Define the auth scopes to request.
+        scope1 = 'https://www.googleapis.com/auth/analytics.readonly'
+        scope2 = 'https://www.googleapis.com/auth/webmasters.readonly'
+        self.view_id="65358754"
+        self.target_url="https://vinepair.com/"
+        key_file_location = 'service.json'
+        credentials = ServiceAccountCredentials.from_json_keyfile_name(
+                key_file_location, scopes=[scope1,scope2])
+        self.ga_service = self.get_ga_service(credentials)
+        self.sc_service = self.get_sc_service(credentials)
+ 
 
     def get_ga_service(self,credentials):
         """
@@ -38,7 +47,7 @@ class Ingest:
         return service
 
 
-    def get_pageviews(self,service,view_id,metric,start,end,filter=True):
+    def get_pageviews(self,metrics,start,end,filter=True):
         """
         Crafts an google analytics query that returns all sessions within the start/end date range.
         Query dimension is pagePathLevel2 (url slug)
@@ -50,14 +59,14 @@ class Ingest:
                         "expressions": ["United States"]}]
         else:
             filters = []
-        results = service.reports().batchGet(
+        results = self.ga_service.reports().batchGet(
             body={
                 'reportRequests': [
                     {
-                        'viewId': view_id,
+                        'viewId': self.view_id,
                         'pageSize': 50000,
                         'dateRanges': [{'startDate':start, 'endDate':end}],
-                        'metrics': [{'expression': 'ga:'+metric}],
+                        'metrics': metrics,
                         'dimensions': [{'name': 'ga:pagePathLevel2'}],
                         'dimensionFilterClauses': [{'filters': filters}],
                     }]
@@ -68,7 +77,7 @@ class Ingest:
         df1['date'] = start
         return df1
 
-    def get_events(self,service,view_id,start,end,filter=True):
+    def get_events(self,start,end,filter=True):
         """
         Crafts an google analytics query that returns all event counts matching "scrolled-to #2"
         for each page/url/slug
@@ -82,11 +91,11 @@ class Ingest:
                         "expressions": ["United States"]}]
         else:
             filters = []
-        results = service.reports().batchGet(
+        results = self.ga_service.reports().batchGet(
             body={
                 'reportRequests': [
                     {
-                        'viewId': view_id,
+                        'viewId': self.view_id,
                         'pageSize': 50000,
                         'dateRanges': [{'startDate':start, 'endDate':end}],
                         'metrics': [{'expression': 'ga:totalEvents'}],
@@ -106,7 +115,7 @@ class Ingest:
         return df2
 
 
-    def get_searchdata(self,service,target_url,dimension,date,filter=True):
+    def get_searchdata(self,dimension,date,filter=True):
         """
         The searchconsole API uses a different search mechanism (RESTful)
         requires a different service, 
@@ -116,12 +125,12 @@ class Ingest:
         """
 
         #double check that we're authenticated to the domain
-        site_list = service.sites().list().execute()
+        site_list = self.sc_service.sites().list().execute()
         verified_sites_urls = [s['siteUrl'] for s in site_list['siteEntry']
                                if s['permissionLevel'] != 'siteUnverifiedUser'
                                and s['siteUrl'][:4] == 'http']
 
-        assert target_url in verified_sites_urls, "ERROR, access to %s not verified!" % target_site_url
+        assert self.target_url in verified_sites_urls, "ERROR, access to %s not verified!" % target_site_url
         if filter:
             filters = [{"dimension": "country",
                         "operator": "equals",
@@ -138,8 +147,8 @@ class Ingest:
                 }
             ],
         }
-        response = service.searchanalytics().query(
-            siteUrl=target_url, body=request).execute()
+        response = self.sc_service.searchanalytics().query(
+            siteUrl=self.target_url, body=request).execute()
         if 'rows' in response:
             df1 = pd.DataFrame(response['rows'])
             slugs = list(self.util.link2slug(link) for link in df1['keys']) 
@@ -150,6 +159,43 @@ class Ingest:
             df1= pd.DataFrame()
         return df1
 
+    def get_google_data(self,db_session,dt_list,pindex_lookup):
+        ga_fields = ["sessions","pageviews","uniquePageviews","avgSessionDuration","entrances","bounceRate","exitRate"]
+        search_fields = ["clicks","ctr","impressions","position"]
+        ga_metrics = list({"expression":"ga:"+field} for field in ga_fields)
+        for dt in dt_list:
+            date_str = dt.strftime("%Y-%m-%d")
+            sql_timestr = dt.strftime("%Y-%m-%d %H-%M-%S")
+            print "Fetching Pageview data for:",date_str
+            try:
+                pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
+                time.sleep(1) # slow down API queries
+            except:
+                time.sleep(60)
+                pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
+                time.sleep(1) # slow down API queries
+            for field in ga_fields:
+                db_session.store_pv_df(pv_df,field,sql_timestr,"pageviews")
+
+
+            print "Fetching Event Data",date_str
+            field="scroll_events"
+            try:
+                ev_df = self.get_events(date_str,date_str)
+                db_session.store_pv_df(ev_df,field,sql_timestr,"events")
+            except:
+                time.sleep(60) # slow down API queries
+                ev_df = self.get_events(date_str,date_str)
+                db_session.store_pv_df(ev_df,field,sql_timestr,"events")
+            print "Fetching Search Data",date_str
+            try:
+                sc_df = self.get_searchdata("page",date_str)
+            except:
+                time.sleep(60)
+                sc_df = self.get_searchdata("page",date_str)
+            for field in search_fields:
+                print "Storing data for",date_str,field
+                db_session.store_pv_df(sc_df,field,sql_timestr,"search")
 
     
 
@@ -221,9 +267,3 @@ class Utils:
             return df
 
 
-
-    def remove_accents(self,input_str):
-        print input_str
-        to_parse = input_str.decode(encoding = "ISO-8859-1")
-        nfkd_form = unicodedata.normalize('NFKD', u"%s" % to_parse)
-        return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
