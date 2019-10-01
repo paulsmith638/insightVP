@@ -65,11 +65,11 @@ class Pagedata(Base_write):
 
 
 class DBsession:
-    def __init__(self,mysql_login,mysql_pass,mysql_port,database):
+    def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,database):
         self.login = mysql_login
         self.password = mysql_pass
         self.port = mysql_port
-        sql_connect  =  'mysql://%s:%s@localhost:%s/%s' % (mysql_login,mysql_pass,mysql_port,database)
+        sql_connect  =  'mysql://%s:%s@%s:%s/%s' % (mysql_login,mysql_pass,mysql_host,mysql_port,database)
         self.engine = create_engine(sql_connect) 
         self.Base = declarative_base()
         self.Base.metadata.create_all(self.engine)

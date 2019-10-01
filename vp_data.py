@@ -12,23 +12,10 @@ from pv_database import DBsession
 tracked_types_csv_file="tracked_types_cats.csv"
 
 
-
-mysql_login = "psmith"
-mysql_pass = "Ins#ght2019"
-mysql_port = 3306
-vinepair_database = "vinepair1"
-wp_database = "vp_wp_data"
-
-#vp_db = DBsession(mysql_login,mysql_pass,mysql_port,vinepair_database)
-#vp_db.ingest_wordpress_tax("vp_wp_data")
-#vp_db.create_lookups()
-#for k,v in vp_db.pindex_lookup.iteritems():
-#    print k,v
-
 class DataProc():
-    def __init__(self,mysql_login,mysql_pass,mysql_port,vinepair_database):
+    def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,vinepair_database):
         #assume initialized database for now
-        self.dbsession = DBsession(mysql_login,mysql_pass,mysql_port,vinepair_database)
+        self.dbsession = DBsession(mysql_login,mysql_pass,mysql_host,mysql_port,vinepair_database)
         self.dbsession.index_columns()
         self.dbe = self.dbsession.session.execute
 
@@ -36,15 +23,17 @@ class DataProc():
         check_tables = list(tup[0] for tup in self.dbe("SHOW TABLES").fetchall())
         for table in ('pindex','pterms','tindex','ttype'):
             if table not in check_tables:
+                print "UPDATING DB",table
                 self.dbsession.ingest_wordpress_tax(wp_database)
         #get min/max dates and other date variables
         self.first_dt = self.dbe("SELECT MIN(date) FROM pagedata").first()[0]
         self.last_dt = self.dbe("SELECT MAX(date) FROM pagedata").first()[0]
-        records = self.dbe("SELECT * FROM pagedata").first()
+        print "DATABASE contains data from %s to %s" % (self.first_dt.strftime("%Y-%m-%d"),
+                                                        self.last_dt.strftime("%Y-%m-%d"))
+        records = self.dbe("SELECT * FROM pagedata LIMIT 1").first()
         if records is not None:
             self.n_days = (self.last_dt - self.first_dt).days + 1
             self.dt_list = list(self.first_dt + datetime.timedelta(days=i) for i in range(self.n_days))
-            self.np_dt_list = np.array(self.dt_list,dtype='datetime64[D]')
         else:
             self.n_days = 0
             self.dt_list,self.np_dt_list = [],[]
@@ -52,6 +41,7 @@ class DataProc():
         self.data_keys = []
         key_query = self.dbe("SELECT DISTINCT `key` FROM pagedata")
         for key in key_query:
+            print "DATA available for key:",key[0]
             self.data_keys.append(key[0].strip())
 
         
@@ -113,7 +103,7 @@ class DataProc():
         #np_cols=("date","count")
         #np_fmt = (np.datetime64,np.float64)
         #np_dtype = np.dtype(zip(np_cols,np_fmt))
-        sql_in = 'SELECT date,count FROM pagedata WHERE pindex=%s AND `key`="%s"' % (pindex,key)
+        sql_in = 'SELECT date,SUM(count) AS total FROM pagedata WHERE pindex=%s AND `key`="%s" GROUP BY date' % (pindex,key)
         query = self.dbe(sql_in)
         dates,values = [],[]
         for result in query:
@@ -146,26 +136,43 @@ class Timeseries():
         self.set_dates(dates)
         self.set_data(values)
     def set_dates(self,dt_list):
-        dt_list.sort()
-        self.start_dt = dt_list[0]
-        self.end_dt = dt_list[-1]
-        n_days = (self.end_dt - self.start_dt).days + 1
-        dt_full =list(self.start_dt + datetime.timedelta(days=i) for i in range(n_days))
-        missing = np.zeros(n_days,dtype=np.bool_)
-        for dti,dt in enumerate(dt_full):
-            if dt not in dt_list:
-                missing[dti] = True
-        
-        self.missing = missing
-        self.invalid = np.zeros(n_days,dtype=np.bool_)
+        if len(dt_list) == 0:
+            self.missing = np.zeros(0,np.bool_)
+            self.invalid =  np.zeros(0,np.bool_)
+        else:
+            dt_list.sort()
+            self.start_dt = dt_list[0]
+            self.end_dt = dt_list[-1]
+            self.n_days = (self.end_dt - self.start_dt).days + 1
+            dt_full = self.get_all_dates()
+            missing = np.zeros(self.n_days,dtype=np.bool_)
+            for dti,dt in enumerate(dt_full):
+                if dt not in dt_list:
+                    missing[dti] = True
+            self.missing_ba=self.pack_bool(missing)
+            self.invalid_ba=self.pack_bool(np.zeros(self.n_days,dtype=np.bool_))
+
+    def missing(self):
+        return np.unpackbits(self.missing_ba)
+    def invalid(self):
+        return np.unpackbits(self.invalid_ba)
+    def pack_bool(self,bool_array):
+        return np.packbits(bool_array)
+
     def set_data(self,values):
         data=[]
         data = np.ones(self.missing.shape[0]) * np.nan
         data[np.invert(self.missing)] = values
         self.data = list(data)
-                
+
+    def get_all_dates(self):
+        dt_full =list(self.start_dt + datetime.timedelta(days=i) for i in range(self.n_days))
+        return dt_full
+    
     def set_invalid(self,index):
-        self.invalid[index] = True
+        invalid = np.unpackbits(self.invalid_ba)
+        invalid[index] = True
+        self.invalid_ba = np.packbits(invalid)
     def show(self):
         n_days = (self.end_dt - self.start_dt).days + 1
         dates = list((self.start_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days))
