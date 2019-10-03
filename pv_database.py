@@ -75,6 +75,10 @@ class DBsession:
         self.Base.metadata.create_all(self.engine)
         self.session = Session(self.engine)
         print "Created Database Session:",database
+        self.pindex_lookup = None
+        self.pterm_lookup = None
+        self.tname_lookup = None
+        self.ttype_lookup = None
 
 
     def create_lookups(self):

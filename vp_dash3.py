@@ -7,7 +7,7 @@ import logging
 from chart_studio.plotly import plot_mpl
 from statsmodels.tsa.seasonal import seasonal_decompose
 from datetime import datetime as dt
-from vp_data import DataProc
+from vp_data import DataProc,Timeseries,AggScheme
 tracked_types_csv_file="/home/paul/work/insight/vinepair/tracked_types_cats.csv"
 mysql_login = "psmith"
 mysql_pass = "Ins#ght2019"
@@ -18,7 +18,11 @@ vinepair_database = "vinepair1"
 db = DataProc(mysql_login,mysql_pass,mysql_host,mysql_port,vinepair_database)
 db.db_init()
 db.dbsession.create_lookups()
-master_ts=pickle.load(open("unique_pv_ts.pkl",'rb'))
+agg1 = AggScheme()
+agg1.get_agg_scheme("Default",db.dbsession.pterm_lookup,csv_in="tracked_types_cats.csv")
+agg_groups = list(gdict['group_name'] for gdict in agg1.scheme['groups'])
+
+agg_schemes = [agg1.scheme,]
 
 logging.basicConfig()
 logger = logging.getLogger('logger')
@@ -30,19 +34,19 @@ external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
 
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
 
-total_pagecounts = []
-for k,d in master_ts.iteritems():
-    for k2,v in d.iteritems():
-        total = np.nansum(v.data)
-        pindex = k
-        total_pagecounts.append((pindex,total))
+#total_pagecounts = []
+#for k,d in master_ts.iteritems():
+#    for k2,v in d.iteritems():
+#        total = np.nansum(v.data)
+#        pindex = k
+#        total_pagecounts.append((pindex,total))
 
-total_pagecounts.sort(key = lambda x: x[1],reverse=True)
-indexed_pages = list(pc[0] for pc in total_pagecounts[0:20])
+#total_pagecounts.sort(key = lambda x: x[1],reverse=True)
+indexed_pages = db.dbsession.pindex_lookup.values()
 #print indexed_pages
 #print indexed_data
 
-
+plots = []
 
 date_dt=db.dt_list #all possible dates
 n_days = len(date_dt)
@@ -53,12 +57,14 @@ def fill_dates(start_dt,end_dt):
     return list(start_dt + datetime.timedelta(days=i) for i in range(n_days+1))
 
 def get_ts_dv(pindex,field):
-    ddict = master_ts[pindex]
-    ts = ddict[field].data
-    start = ddict[field].start_dt
-    end = ddict[field].end_dt
-    dates = fill_dates(start,end)
-    return dates,ts
+    d,v = db.get_timeseries_pindex(pindex,'uniquePageviews')
+    return d,v
+    #ddict = master_ts[pindex]
+    #ts = ddict[field].data
+    #start = ddict[field].start_dt
+    #end = ddict[field].end_dt
+    #dates = fill_dates(start,end)
+    #return dates,ts
 
 def get_page_info(pindex):
     title = ""
@@ -110,59 +116,96 @@ app.layout = html.Div([#L1
 
         ], className="three columns",style={'width':'25%'}),
         html.Div([ #L3
-            html.H5('Pindex'),
+            html.H5('Metric'),
             dcc.Dropdown(
-                id='cat-dropdown',
-                options = list({"label":Pindex,"value":Pindex} for Pindex in indexed_pages),
+                id='cat-dropdown1',
+                options = list({"label":metric,"value":metric} for metric in db.data_keys),
+                value="pageviews"
+            ),
+            html.Div(id="cat_select_output1", style={'display':'none'})
+
+        ], className="three columns",style={'width':'25%'}),
+        html.Div([ #L3
+            html.H5('Page Group'),
+            dcc.Dropdown(
+                id='cat-dropdown2',
+                options = list({"label":Group,"value":Group} for Group in agg_groups),
                 value=indexed_pages[0]
             ),
-            html.Div(id="cat_select_output", style={'display':'none'})
+            html.Div(id="cat_select_output2", style={'display':'none'})
+
+        ], className="three columns",style={'width':'25%'}),
+        html.Div([ #L3
+            html.H5('Aggregation Scheme'),
+            dcc.Dropdown(
+                id='cat-dropdown3',
+                options = list({"label":scheme['name'],"value":scheme['name']} for scheme in agg_schemes),
+                value=agg_schemes[0]["name"]
+            ),
+            html.Div(id="cat_select_output3", style={'display':'none'})
 
         ], className="three columns",style={'width':'25%'}),
         html.Div([html.Button('Model', id='model_button')]),
     ],className="row"),
-    html.Div([dcc.Graph(id='plot1')]),
+    html.Div([dcc.Graph(id='plot1',figure=plots)]),
     html.Div([dcc.Graph(id='plot2')]),
 ],
 )
 
-
+"""
 @app.callback(
-    Output('plot1', 'figure'),[Input('cat-dropdown', 'value'),
+    Output('plot1', 'figure'),[Input('cat-dropdown1', 'value'),
                                Input('my-date-picker-single2', 'date'),
                                Input('my-date-picker-single1','date')])
 def update_plot1(pindex,start_date,end_date):
     start_dt = dt.strptime(start_date.split(' ')[0], '%Y-%m-%d')
     end_dt = dt.strptime(end_date.split(' ')[0], '%Y-%m-%d')
-    d,v = get_ts_dv(pindex,'uniquePageviews')
+    d,v = [],[]
     plot1_xdata = d
     plot1_ydata = v
-    p,t,c,s = get_page_info(pindex)
-    graph_title = "[%s %s %s %s]" % (str(p),t,c,s)
+    #p,t,c,s = get_page_info(pindex)
+    #graph_title = "[%s %s %s %s]" % (str(p),t,c,s)
+    graph_title = "test"
     return {'data': [{'x': plot1_xdata, 'y': plot1_ydata, 'type': 'bar', 'name': 'PageViews'},],
                 'layout': {'title': '%s vs. Date' % graph_title}}
+
+"""
 @app.callback(
-    Output('plot2', 'figure'),[Input('cat-dropdown', 'value'),
+    Output('plot2', 'figure'),[Input('cat-dropdown1', 'value'),
+                               Input('cat-dropdown2', 'value'),
+                               Input('cat-dropdown3', 'value'),
                                Input('my-date-picker-single2', 'date'),
                                Input('my-date-picker-single1','date'),
                                Input('model_button', 'n_clicks')])
-def model_data(cat,start_date,end_date,n_clicks):
+def plot_custom_data(metric,pgroup,scheme_name,start_date,end_date,n_clicks):
+    print metric,pgroup,scheme_name,start_date,end_date,n_clicks
     start_dt = dt.strptime(start_date.split(' ')[0], '%Y-%m-%d')
     end_dt = dt.strptime(end_date.split(' ')[0], '%Y-%m-%d')
-    ilist = get_dates_index(start_dt,end_dt)
-    model_xdata = get_date_strings(ilist)
-    data = list(cat_array[np.nonzero(cat_array['category'] == cat)[0]][list(str(i) for i in ilist)])
-    model_ydata = indexed_data[data]
-    ydat = list(model_ydata)
-    
-    pdf = pd.DataFrame(ydat)
-    pdf.index = pd.to_datetime(model_xdata)
-    result = seasonal_decompose(pdf, model='multiplicative')
-    trend =  result.trend[0].tolist()
-    resid = result.resid[0].tolist()
-    seasonal = result.seasonal[0].tolist()
-    return {'data': [{'x': model_xdata, 'y': model_ydata, 'type': 'line', 'name': 'PageViews'},
-                     {'x': date_strings, 'y': trend, 'type': 'line', 'name': 'trend','color':'red'},],
-            'layout': {'title': 'Trend vs. Date'}}
+    for si,scheme in enumerate(agg_schemes):
+        if scheme['name'] == scheme_name:
+            agg_scheme = agg_schemes[si]
+    plot_x_list = []
+    plot_y_list = []
+    series_names = []
+    for gdict in agg_scheme['groups']:
+        name = gdict['group_name']
+        series_names.append(name)
+        plist = gdict['group_pages']
+        dates,agg_total = db.get_sumseries_plist(plist,metric)
+        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates)
+        plot_x_list.append(dates_str)
+        plot_y_list.append(agg_total)
+    #pdf = pd.DataFrame(ydat)
+    #pdf.index = pd.to_datetime(model_xdata)
+    #result = seasonal_decompose(pdf, model='multiplicative')
+    #trend =  result.trend[0].tolist()
+    #resid = result.resid[0].tolist()
+    #seasonal = result.seasonal[0].tolist()
+    data_list = list({'x': plot_x_list[i],'y':plot_y_list[i],'type':'line','name':series_names[i]} for i in range(len(series_names)))
+    print data_list
+    return {'data': data_list,
+            'layout': {'title': '%s vs. Date' % metric }}
+
+#plots = plot_custom_data("pageviews","Spirits","Default",date_dt[0],date_dt[-1],0)
 if __name__ == '__main__':
     app.run_server(debug=True)#, host='0.0.0.0')
