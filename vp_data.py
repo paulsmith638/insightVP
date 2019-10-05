@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import Column, Integer, Float,String, DateTime,MetaData,Table
 from sqlalchemy.ext.declarative import declarative_base
 from pv_database import DBsession
+import pandas as pd
 
 tracked_types_csv_file="tracked_types_cats.csv"
 
@@ -111,7 +112,8 @@ class DataProc():
                 coli = np.nonzero(np_dt_list==date)[0][0]
                 np_data[row_index,coli] = value
         total = np.nansum(np_data,axis=0)
-        return dates,list(total)
+        output_dates = list(ndt.tolist() for ndt in np_dt_list)
+        return output_dates,list(total)
 
 
     def get_index_matrix(self):
@@ -165,58 +167,99 @@ class DataProc():
         print tlist
 
         
-class Timeseries():
+class TimeSeries():
     def __init__(self,dates,values):
+        if len(dates) != len(values):
+            print "WARNING: date/value mismatch!"
+            #if len(dates) > len(values):
+            #    for i in range(len(dates) - len(values)):
+            #        values.append(0.0) # zero pad 
+            #if len(values) > len(dates):
+            #    values=values[0:len(dates)] # truncate
+        dat = zip(dates,values)
+        dat.sort(key = lambda x:x[0])
+        dates = list(dv[0] for dv in dat)
+        values = list(dv[1] for dv in dat)
+
         self.set_dates(dates)
         self.set_data(values)
     def set_dates(self,dt_list):
         if len(dt_list) == 0:
-            self.missing = np.zeros(0,np.bool_)
-            self.invalid =  np.zeros(0,np.bool_)
-        else:
-            dt_list.sort()
-            self.start_dt = dt_list[0]
-            self.end_dt = dt_list[-1]
-            self.n_days = (self.end_dt - self.start_dt).days + 1
-            dt_full = self.get_all_dates()
-            missing = np.zeros(self.n_days,dtype=np.bool_)
-            for dti,dt in enumerate(dt_full):
-                if dt not in dt_list:
-                    missing[dti] = True
-            self.missing_ba=self.pack_bool(missing)
-            self.invalid_ba=self.pack_bool(np.zeros(self.n_days,dtype=np.bool_))
-
-    def missing(self):
-        return np.unpackbits(self.missing_ba)
-    def invalid(self):
-        return np.unpackbits(self.invalid_ba)
-    def pack_bool(self,bool_array):
-        return np.packbits(bool_array)
-
+            self.dates = []
+            self.missing = []
+            return
+        self.start_dt = dt_list[0]
+        self.end_dt = dt_list[-1]
+        self.n_days = (self.end_dt - self.start_dt).days + 1
+        self.dates = self.get_all_dates() #fill in all dates
+        self.missing = np.zeros(self.n_days,dtype=np.bool_)
+        for dti,dt in enumerate(self.dates):
+            if dt not in dt_list:
+                self.missing[dti] = True
+                
     def set_data(self,values):
-        data=[]
+        if len(values) == 0:
+            self.data=[]
+            return
         data = np.ones(self.missing.shape[0]) * np.nan
         data[np.invert(self.missing)] = values
         self.data = list(data)
-
+ 
     def get_all_dates(self):
         dt_full =list(self.start_dt + datetime.timedelta(days=i) for i in range(self.n_days))
         return dt_full
+
+    def median_filter(self,threshold=5):
+        signal = np.array(self.data)
+        difference = np.abs(signal - np.median(signal))
+        median_difference = np.median(difference)
+        if median_difference == 0:
+            s = 0
+        else:
+            s = difference / float(median_difference)
+        mask = s > threshold
+        print "FILTER",np.count_nonzero(mask)
+        signal[mask] = np.median(signal)
+        return list(signal)
+
+    def rolling_median_filter(self,window=11,sigcut=10):
+        if len(self.data) == 0:
+            return []
+        rolling_median=[]
+        np_dat = np.array(self.data)
+        tails = int(window/2)
+        for index_window in range(0,len(self.data)-2*tails,1):
+            win_dat = np_dat[index_window:index_window+window]
+            win_med = float(np.nanmedian(win_dat))
+            rolling_median.append(win_med)
+            if index_window < tails:
+                rolling_median.append(win_med)
+        for i in range(tails):
+            rolling_median.append(win_med)
+        rm_np = np.array(rolling_median)
+        diff = np_dat - rm_np #only positive differences (spikes)
+        threshold = np.nanstd(self.data) * sigcut
+        mask = diff > threshold
+        output = np.array(self.data)
+        output[mask] = rm_np[mask]
+        return list(output)
     
-    def set_invalid(self,index):
-        invalid = np.unpackbits(self.invalid_ba)
-        invalid[index] = True
-        self.invalid_ba = np.packbits(invalid)
+    def fill_nan(self,list_in):
+        dat = np.array(list_in)
+        mask = dat == np.nan
+        median = np.nanmedian(dat)
+        dat[mask] = median
+        return list(dat)
+        
+
+
     def show(self):
         n_days = (self.end_dt - self.start_dt).days + 1
         dates = list((self.start_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days))
         print "%12s %12s %6s %6s" % ("   DATE   ","  Value  "," Missing "," Invalid ")
         missing = self.missing
-        invalid = self.invalid
-        for thing in dates,missing,invalid,self.data:
-            print len(thing)
         for i in range(n_days):
-            print "%12s %12f %6s %6s" % (dates[i],self.data[i],missing[i],invalid[i])
+            print "%12s %12f %6s" % (dates[i],self.data[i],missing[i])
 
         
 class AggScheme():
