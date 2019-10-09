@@ -12,11 +12,10 @@ import pandas as pd
 
 tracked_types_csv_file="tracked_types_cats.csv"
 
-
 class DataProc():
-    def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,vinepair_database):
+    def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,database):
         #assume initialized database for now
-        self.dbsession = DBsession(mysql_login,mysql_pass,mysql_host,mysql_port,vinepair_database)
+        self.dbsession = DBsession(mysql_login,mysql_pass,mysql_host,mysql_port,database)
         self.dbsession.index_columns()
         self.dbe = self.dbsession.session.execute
         self.index_mat = None
@@ -98,7 +97,7 @@ class DataProc():
         return dates,values
 
     
-    def aggregate_by_plist(self,plist,key):
+    def aggregate_by_plist(self,plist,key,prefilter=False):
         n_rows = len(plist)
         n_col = self.n_days
         np_data = np.zeros((n_rows,n_col),dtype=np.float64)
@@ -106,6 +105,16 @@ class DataProc():
         #in case of missing data, match indices to master date list, rest will be zero
         for row_index,pindex in enumerate(plist):
             dates,values = self.get_timeseries_pindex(pindex,key)
+            if prefilter:
+                ts = TimeSeries(dates,values)
+                old_values = ts.data
+                new_values = ts.rolling_median_filter()
+                diff = np.abs(np.array(old_values)-np.array(new_values))
+                mean = np.nanmean(new_values)
+                n_diff = np.count_nonzero(diff>mean)
+                print "   --> filtered %d points" % n_diff
+                values = new_values
+                dates = ts.dates
             np_dates = np.array(dates,dtype='datetime64[D]')
             dv_list = zip(np_dates,values)
             for date,value in dv_list:
@@ -251,8 +260,43 @@ class TimeSeries():
         dat[mask] = median
         return list(dat)
         
+    def arima_model(self,dates,values):
+        pdf = pd.DataFrame(values)
+        pdf.index = pd.to_datetime(dates)
+        result = seasonal_decompose(pdf, model='multiplicative',two_sided=False,extrapolate_trend=30)
+        trend =  result.trend[0].tolist()
+        resid = result.resid[0].tolist()
+        seasonal = result.seasonal[0].tolist()
+        """
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        from matplotlib import pyplot as plt
+        train = pdf.ix[0:365,0]
+        test = pdf.ix[365:,0]
+        sarima_model = SARIMAX(train, order=(0, 1, 2,4,8,16), seasonal_order=(0, 1, 2, 12,52), enforce_invertibility=False, enforce_stationarity=False)
+        sarima_fit = sarima_model.fit()
 
+        sarima_pred = sarima_fit.get_prediction(test.index[0], test.index[-1])
+        predicted_means = sarima_pred.predicted_mean #+ test.rolling(12).mean().dropna().values
+        predicted_intervals = sarima_pred.conf_int(alpha=0.25)
+        lower_bounds = predicted_intervals['lower y']# + df.data.iloc[365:,0].rolling(12).mean().dropna().values
+        upper_bounds = predicted_intervals['upper y']# + df.data.iloc[365:,0].rolling(12).mean().dropna().values
 
+        sarima_rmse = np.sqrt(np.mean(np.square(test.values - sarima_pred.predicted_mean.values)))
+
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(pdf.index, pdf.values)
+        ax.plot(test.index, test.values)# + pdf.iloc[365:,0].rolling(12).mean().dropna().values, label='truth')
+        ax.plot(test.index, predicted_means, color='#ff7823', linestyle='--', label="prediction (RMSE={:0.2f})".format(sarima_rmse))
+        ax.fill_between(test.index, lower_bounds, upper_bounds, color='#ff7823', alpha=0.3, label="confidence interval (95%)")
+        ax.legend();
+        ax.set_title("SARIMA");
+        plt.show()
+        sys.exit()
+        """
+        #result.plot()
+        #pyplot.show()
+        return trend,resid,seasonal
+    
     def show(self):
         n_days = (self.end_dt - self.start_dt).days + 1
         dates = list((self.start_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days))

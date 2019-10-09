@@ -13,11 +13,6 @@ from pv_ingest import Utils
 ingest = Ingest()
 util = Utils()
 
-wordpress_database = "vp_wp_data"
-mysql_login = "psmith"
-mysql_pass = "Ins#ght2019"
-mysql_port = 3306
-
 Base_write = declarative_base()
 
 # class definitions for sqlalchemy
@@ -61,8 +56,13 @@ class Pagedata(Base_write):
     date = Column(DateTime)
     count = Column(Float)
 
-
-
+class Stermdata(Base_write):
+    __tablename__ = "searchdata"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(length=256))
+    sterm = Column(String(length=256))
+    date = Column(DateTime)
+    count = Column(Integer)
 
 class DBsession:
     def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,database):
@@ -229,6 +229,8 @@ class DBsession:
 
     def store_pv_df(self,pv_df,field,sql_timestr,frame_type):
         self.session.execute("DELETE FROM pagedata WHERE date='%s' AND `key`='%s'" % (sql_timestr,field))
+        if pv_df.shape[0] == 0:
+            return
         if frame_type == "pageviews":
             for idx,row in pv_df.iterrows():
                 slug = row["slug"]
@@ -261,4 +263,11 @@ class DBsession:
                 if pindex > 0:
                     record = Pagedata(pindex=pindex,key=field,count=count,date=sql_timestr)
                     self.session.add(record)
+            self.session.commit()
+        if frame_type == "searchterm":
+            for idx,row in pv_df.iterrows():
+                sterm = row["slug"]
+                count = row[field]
+                record = Stermdata(sterm=sterm,key=field,count=count,date=sql_timestr)
+                self.session.add(record)
             self.session.commit()
