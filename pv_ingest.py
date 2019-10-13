@@ -169,66 +169,75 @@ class Ingest:
 
 
     
-    def get_google_data(self,db_session,dt_list,pindex_lookup):
+    def get_google_data(self,db_session,dt_list,pindex_lookup,targets=["pv","ev","sp","st"]):
+        """
+        Ingests data by calling API query functions above. 
+        db_session = mysql connection
+        dt_list = list of datetimes over which to iterate
+        pindex_lookup = dict for converting slugs to page index
+        targets = list of which data to get, pv=pageviews, ev=events, sp=search pages, st=search terms
+        """
         ga_fields = ["sessions","pageviews","uniquePageviews","avgSessionDuration","entrances","bounceRate","exitRate"]
         search_fields = ["clicks","ctr","impressions","position"]
         ga_metrics = list({"expression":"ga:"+field} for field in ga_fields)
         for dt in dt_list:
             date_str = dt.strftime("%Y-%m-%d")
             sql_timestr = dt.strftime("%Y-%m-%d %H-%M-%S")
-            """
             # PAGEVIEWS
-            print "Fetching Pageview data for:",date_str
-            try:
-                pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
-                time.sleep(1) # slow down API queries
-            except: #try again for failed connection
-                time.sleep(60)
-                pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
-                time.sleep(1) # slow down API queries
-            for field in ga_fields:
-                db_session.store_pv_df(pv_df,field,sql_timestr,"pageviews")
+            if "pv" in targets:
+                print "Fetching Pageview data for:",date_str
+                try:
+                    pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
+                    time.sleep(1) # slow down API queries
+                except: #try again for failed connection
+                    time.sleep(60)
+                    pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
+                    time.sleep(1) # slow down API queries
+                for field in ga_fields:
+                    db_session.store_pv_df(pv_df,field,sql_timestr,"pageviews")
 
             # EVENTS
-            print "Fetching Event Data",date_str
-            field="scroll_events"
-            try:
-                ev_df = self.get_events(date_str,date_str)
-                db_session.store_pv_df(ev_df,field,sql_timestr,"events")
-            except:
-                time.sleep(60) # slow down API queries
-                ev_df = self.get_events(date_str,date_str)
-                db_session.store_pv_df(ev_df,field,sql_timestr,"events")
-            #SEARCH
-            print "Fetching Search Data by Page",date_str
-            try:
-                sc_df = self.get_searchdata("page",date_str)
-            except:
-                time.sleep(60)
-                sc_df = self.get_searchdata("page",date_str)
-            for field in search_fields:
-                print "Storing data for",date_str,field
-                db_session.store_pv_df(sc_df,field,sql_timestr,"search")
+            if "ev" in targets:
+                print "Fetching Event Data",date_str
+                field="scroll_events"
+                try:
+                    ev_df = self.get_events(date_str,date_str)
+                    db_session.store_pv_df(ev_df,field,sql_timestr,"events")
+                except:
+                    time.sleep(60) # slow down API queries
+                    ev_df = self.get_events(date_str,date_str)
+                    db_session.store_pv_df(ev_df,field,sql_timestr,"events")
+            #SEARCH PAGES
+            if "sp" in targets:
+                print "Fetching Search Data by Page",date_str
+                try:
+                    sc_df = self.get_searchdata("page",date_str)
+                except:
+                    time.sleep(60)
+                    sc_df = self.get_searchdata("page",date_str)
+                for field in search_fields:
+                    print "Storing data for",date_str,field
+                    db_session.store_pv_df(sc_df,field,sql_timestr,"search")
 
-            """
-            print "Fetching Search Data by Query",date_str
-            try:
-                scp_df = self.get_searchdata("query",date_str)
-            except:
-                time.sleep(60)
-                scp_df = self.get_searchdata("query",date_str)
-            #if search data is null or missing
-            if scp_df.shape[0] == 0:
-                continue
-            #these dataframes contain alot of data with few clicks and/or impressions
-            #filter out both
-            low_click = scp_df['clicks'] < 1
-            low_impress = scp_df['impressions'] < 50
-            mask = np.logical_or(low_click,low_impress)
-            scp_df = scp_df.loc[np.invert(mask),:]
-            for field in search_fields:
-                print "Storing Term data for",date_str,field
-                db_session.store_pv_df(scp_df,field,sql_timestr,"searchterm")
+            if "st" in targets:
+                print "Fetching Search Data by Query",date_str
+                try:
+                    scp_df = self.get_searchdata("query",date_str)
+                except:
+                    time.sleep(60)
+                    scp_df = self.get_searchdata("query",date_str)
+                #if search data is null or missing
+                if scp_df.shape[0] == 0:
+                    continue
+                #these dataframes contain alot of data with few clicks and/or impressions
+                #filter out both
+                low_click = scp_df['clicks'] < 1
+                low_impress = scp_df['impressions'] < 50
+                mask = np.logical_or(low_click,low_impress)
+                scp_df = scp_df.loc[np.invert(mask),:]
+                for field in search_fields:
+                    print "Storing Term data for",date_str,field
+                    db_session.store_pv_df(scp_df,field,sql_timestr,"searchterm")
 
     
 

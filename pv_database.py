@@ -267,6 +267,8 @@ class DBsession:
         if frame_type == "searchterm":
             for idx,row in pv_df.iterrows():
                 sterm = row["slug"]
+                if len(sterm) > 250: #hack to truncate long searches
+                    sterm = sterm[0:250]
                 count = row[field]
                 record = Stermdata(sterm=sterm,key=field,count=count,date=sql_timestr)
                 self.session.add(record)

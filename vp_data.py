@@ -1,4 +1,4 @@
-import sys,os,time,datetime,pickle
+import sys,os,time,datetime,pickle,csv
 from statsmodels.tsa.seasonal import seasonal_decompose
 import numpy as np
 from sqlalchemy import create_engine
@@ -94,7 +94,7 @@ class DataProc():
         for result in query:
             dates.append(result[0])
             values.append(result[1])
-        return dates,values
+        return values,dates
 
     
     def aggregate_by_plist(self,plist,key,prefilter=False):
@@ -122,7 +122,7 @@ class DataProc():
                 np_data[row_index,coli] = value
         total = np.nansum(np_data,axis=0)
         output_dates = list(ndt.tolist() for ndt in np_dt_list)
-        return output_dates,list(total)
+        return list(total),output_dates
 
 
     def get_index_matrix(self):
@@ -192,6 +192,8 @@ class TimeSeries():
 
         self.set_dates(dates)
         self.set_data(values)
+        self.name = "Series"
+        
     def set_dates(self,dt_list):
         if len(dt_list) == 0:
             self.dates = []
@@ -259,7 +261,7 @@ class TimeSeries():
         median = np.nanmedian(dat)
         dat[mask] = median
         return list(dat)
-        
+
     def arima_model(self,dates,values):
         pdf = pd.DataFrame(values)
         pdf.index = pd.to_datetime(dates)
@@ -305,6 +307,41 @@ class TimeSeries():
         for i in range(n_days):
             print "%12s %12f %6s" % (dates[i],self.data[i],missing[i])
 
+    def ts_to_array(self,ts_list):
+        # takes a list of timeseries and creates a numpy structured array
+        # allows for missing data, shifted series, etc.
+        dates_list = []
+        for ts in ts_list:
+            dates_list = dates_list + ts.dates
+        dates_list = list(set(dates_list))
+        dates_list.sort()
+        date_lookup = {}
+        for di,dt in enumerate(dates_list):
+            date_lookup[dt] = di
+        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
+        n_col = len(dates_list)
+        n_row = len(ts_list)
+        arr = np.ones((n_row,n_col),dtype=np.float64) * np.nan
+        for ti,ts in enumerate(ts_list):
+            d = ts.dates
+            v = ts.data
+            for di,dt in enumerate(d):
+                coli = date_lookup[dt]
+                arr[ti,coli] = v[di]
+        return arr,dates_list
+            
+
+    def arr_show(self,arr,dates_list):
+        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
+        if len(dates_str) > 5:
+            print "TS ARRAY     %12s %12s %12s . . . %12s %12s %12s" % (dates_str[0],dates_str[1],dates_str[2],
+                                                                        dates_str[-3],dates_str[-2],dates_str[-1])
+            for row in arr:
+                print "    series   %12.2f %12.2f %12.2f . . . %12.2f %12.2f %12.2f" % (row[0],row[1],row[2],
+                                                                                      row[-3],row[-2],row[-2])
+        else:
+            print dates_str
+            print arr
         
 class AggScheme():
     def __init__(self):
@@ -317,31 +354,33 @@ class AggScheme():
         """
         Reads in a csv file with the following format:
         group_name,tracked_tag1,tracked_tag2,tracked_tag3, etc.
-        returns dict tindex --> group_name
+        positive values are included, negative values are excluded
+        returns a dictionary with name and groups
 
-        Generates dict of tracked pages for each tindex in above
-        dict tindex --> list of tracked pindex
+        groups is list of dictionaries:
+             key=group_name, e.g. Whiskey
+             val = list of associated pindex
+
         """
+        rev_look = {}
         track_lookup={}
-        track_f = open(csv_in,'r')
-        for ln,line in enumerate(track_f):
-            if ln > 0:
-                fields = line.split(',')
-                if len(fields) > 1:
-                    cat = fields[0]
-                    ids = fields[1::]
-                    for tindex in ids:
-                        tdig=""
-                        for letter in tindex:
-                            if letter.isdigit():
-                                tdig=tdig+letter
-                        if len(tdig)>0:
-                            track_lookup[int(tdig)] = cat.replace('"','').strip()
-        track_f.close()
-        self.tracked_tindex = track_lookup.keys()
-        
-        #get tracked pages
-        #dict tindex-->list of pindexes
+        with open(csv_in,'r') as track_f:
+            reader = csv.reader(track_f,delimiter=',')
+            header = next(reader)
+            rows = [(row[0], list(int(row[i]) for i in range(1,len(row)) if len(row[i]) > 0)) for row in reader]
+        track_lookup = {}
+        for track_t in rows:
+            track_name = track_t[0]
+            tindex_include = list(tindex for tindex in track_t[1] if tindex > 0)
+            tindex_exclude = list(-tindex for tindex in track_t[1] if tindex < 0)
+            track_lookup[track_name] = {"include":tindex_include,"exclude":tindex_exclude}
+        tracked_tindex = []
+        for tdict in track_lookup.values():
+            for tindex in tdict["include"]:
+                tracked_tindex.append(tindex)
+        self.tracked_tindex = tracked_tindex
+        #get tracked pages for each tindex
+        #essentially, invert the pterm lookup
         self.tracked_tindex_pages={}
         for pindex,tlist in self.pterm_lookup.iteritems():
             for tindex in tlist:
@@ -349,20 +388,28 @@ class AggScheme():
                     plist = self.tracked_tindex_pages.get(tindex,[])
                     plist.append(pindex)
                     self.tracked_tindex_pages[tindex] = plist
-        for tindex,tlist in self.tracked_tindex_pages.iteritems():
-            group_name = track_lookup[tindex]
-            tracked_pages = tlist
+        for gname,tdict in track_lookup.iteritems():
+            group_name = gname
+            tracked_pages = []
+            excluded_pages = []
+            for tindex in tdict["include"]:
+                tracked_pages = tracked_pages + self.tracked_tindex_pages.get(tindex,[])
+            for tindex in tdict["exclude"]:
+                excluded_pages = excluded_pages +self.tracked_tindex_pages.get(tindex,[])
+            tracked_pages = set(tracked_pages)
+            excluded_pages = set(excluded_pages)
+            final_pages = list(tracked_pages - excluded_pages)
             if len(self.scheme["groups"]) == 0:
-                gdict = {"group_name":group_name,"group_pages":tracked_pages}
+                gdict = {"group_name":group_name,"group_pages":final_pages}
                 self.scheme["groups"].append(gdict)
             else:
                 existing_groups = list(gdict["group_name"] for gdict in self.scheme["groups"])
                 if group_name in existing_groups:
                     for gdict in self.scheme["groups"]:
                         if gdict["group_name"] == group_name:
-                            gdict["group_pages"] = gdict["group_pages"] + tracked_pages
+                            gdict["group_pages"] = list(set(gdict["group_pages"] + final_pages))
                 else:
-                    gdict = {"group_name":group_name,"group_pages":tracked_pages}
+                    gdict = {"group_name":group_name,"group_pages":final_pages}
                     self.scheme["groups"].append(gdict) 
                     
 
@@ -387,3 +434,14 @@ class AggScheme():
             if len(output_pages) > 0:
                 output_list.append({'group_name':gname,'group_pages':output_pages})
         self.scheme["groups"] = output_list
+
+
+    def get_page_weights(self,proc):
+        """
+        *** Propriatary Algorithm ***
+        """
+
+    def agg_remove_spikes(self,proc,plist,metric,cutoff=0.5,sigcut=10.0,hardcut=5000):
+        """
+        *** Propriatary Algorithm ***
+        """
