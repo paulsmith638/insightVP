@@ -9,9 +9,12 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy_utils import database_exists,create_database
 from pv_ingest import Ingest
 from pv_ingest import Utils
+from vp_prop import vinepair_creds
+
 #instantialize classes
 ingest = Ingest()
 util = Utils()
+creds = vinepair_creds()
 
 Base_write = declarative_base()
 
@@ -191,44 +194,72 @@ class DBsession:
     
     def index_columns(self):
         check_tables = list(tup[0] for tup in self.session.execute("SHOW TABLES").fetchall())
-        if 'pagedata' in check_tables:
-            check_idx = self.session.execute("SHOW INDEX FROM pagedata").fetchall()
-            check_keys = set(list(tup[2][4::] for tup in check_idx))
-            col_list = ('pindex','date','key')
-            #check/create single key columns
-            for col in col_list:
-                if col not in check_keys:
-                    if col == "key":
-                        col = "`key`"
-                    cstr = col.replace('`',"")
-                    print "Creating index on:",cstr
-                    sql = "CREATE INDEX idx_%s ON pagedata(%s)" % (cstr,col)
-                    self.session.execute(sql)
-            #add composite column keys
-            for i in range(len(col_list)):
-                for j in range(i+1,len(col_list)):
-                    col1 = col_list[i]
-                    col2 = col_list[j]
-                    if col1 == "key":
-                        col1 = "`key`"
-                    if col2 == "key":
-                        col2 = "`key`"
-                    comp = col1+","+col2
-                    cstr = col_list[i]+"_"+col_list[j]
-                    cstr = cstr.replace('`',"")
-                    if cstr not in check_keys:
+        for table in ("pagedata","searchdata"):
+            if table not in check_tables:
+                print "Error: %s table does not exist!" % table
+            else:
+                check_idx = self.session.execute("SHOW INDEX FROM %s" % table).fetchall()
+                check_keys = set(list(tup[2][4::] for tup in check_idx))
+                if table == "pagedata":
+                    mterm = "pindex"
+                else:
+                    mterm = "sterm"
+                col_list = (mterm,'date','key')
+                #check/create single key columns
+                for col in col_list:
+                    if col not in check_keys:
+                        if col == "key":
+                            col = "`key`"
+                        cstr = col.replace('`',"")
                         print "Creating index on:",cstr
-                        sql = "CREATE INDEX idx_%s ON pagedata(%s)" % (cstr,comp)
+                        sql = "CREATE INDEX idx_%s ON %s(%s)" % (cstr,table,col)
                         self.session.execute(sql)
+                #add composite column keys
+                for i in range(len(col_list)):
+                    for j in range(i+1,len(col_list)):
+                        col1 = col_list[i]
+                        col2 = col_list[j]
+                        if col1 == "key":
+                            col1 = "`key`"
+                        if col2 == "key":
+                            col2 = "`key`"
+                        comp = col1+","+col2
+                        cstr = col_list[i]+"_"+col_list[j]
+                        cstr = cstr.replace('`',"")
+                        if cstr not in check_keys:
+                            print "Creating index on:",cstr
+                            sql = "CREATE INDEX idx_%s ON %s(%s)" % (cstr,table,comp)
+                            self.session.execute(sql)
+                all_col = mterm+",date,`key`"
+                all_str = "_".join(col_list)
+                if all_str not in check_keys:
+                    print "Creating index on:",all_str
+                    sql = "CREATE INDEX idx_%s ON %s(%s)" % (all_str,table,all_col)
+                    self.session.execute(sql)
+                    
+    def deduplicate_sql(self):
+        """
+        ingest may duplicate values, keep values with max id (latest added)
+        """
+        for table in ("pagedata","searchdata"):
+            if table == "pagedata":
+                mterm = "pindex"
+                print "Removing Duplicates from pagedata"
+            else:
+                mterm = "sterm"
+                print "Removing Duplicates from searchdata"
+            
+            sql = "DELETE FROM %s WHERE id IN " % table + \
+                  "(WITH duplicates AS (SELECT MAX(id) AS " + \
+                  "lastId,%s,date,`key` FROM %s GROUP BY %s,date,`key` HAVING count(*) > 1)," % (mterm,table,mterm) + \
+                  "dupId AS (SELECT id FROM %s INNER JOIN duplicates on %s.%s = duplicates.%s " % (table,table,mterm,mterm) + \
+                  "AND %s.date = duplicates.date AND %s.`key` = duplicates.`key` " % (table,table) + \
+                  "WHERE %s.id < duplicates.lastId) SELECT * FROM dupId)" % table
+            print sql
+            #self.session.execute(sql)
 
-
-            print "Verified all column indexes"
-        else:
-            print "Error: pagedata tables does not exist"
-                
-
+            
     def store_pv_df(self,pv_df,field,sql_timestr,frame_type):
-        self.session.execute("DELETE FROM pagedata WHERE date='%s' AND `key`='%s'" % (sql_timestr,field))
         if pv_df.shape[0] == 0:
             return
         if frame_type == "pageviews":

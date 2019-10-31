@@ -70,33 +70,42 @@ class DataProc():
             
             
     def get_timeseries_pindex(self,pindex,key):
+        """
+        Fetches time series for a given pindex and key (e.g. pageviews)
+        Updates a cache for repeat queries
+
+        """
         cur_pindex_data = self.data_cache.get(pindex,{})
         if key in cur_pindex_data.keys():
-            print "Fetching timeseries from cache"
+            print "Fetching %g %s timeseries from cache" % (pindex,key)
             return cur_pindex_data[key]
         else:
             sql_in = 'SELECT date,SUM(count) AS total FROM pagedata WHERE pindex=%s AND `key`="%s" GROUP BY date' % (pindex,key)
-            print sql_in
-            query = self.dbe(sql_in)
-            dates,values = [],[]
-            for result in query:
-                dates.append(result[0])
-                values.append(result[1])
+            print "Fetching %g %s timeseries from DATABASE" % (pindex,key)
+            query = self.dbe(sql_in).fetchall()
+            din = list(res[0] for res in query)
+            vin = list(res[1] for res in query)
+            alld = zip(din,vin)
+            alld.sort(key = lambda t:t[0])
+            dates = list(t[0] for t in alld)
+            values = list(t[1] for t in alld)
             cur_pindex_data[key] = (dates,values)
+            self.data_cache[pindex] = cur_pindex_data
             return dates,values
-        
-    def get_sumseries_plist(self,plist,key):
-        plist_sql = "("+",".join(list("%d" % pindex for pindex in plist))+")"
-        sql_in = 'SELECT date,SUM(count) AS total FROM pagedata WHERE pindex IN %s AND `key`="%s" GROUP BY date' % (plist_sql,key)
-        query = self.dbe(sql_in)
-        dates,values = [],[]
-
-        for result in query:
-            dates.append(result[0])
-            values.append(result[1])
-        return values,dates
+    #no longer used    
+    #def get_sumseries_plist(self,plist,key):
+    #    plist_sql = "("+",".join(list("%d" % pindex for pindex in plist))+")"
+    #    sql_in = 'SELECT date,SUM(count) AS total FROM pagedata WHERE pindex IN %s AND `key`="%s" GROUP BY date' % (plist_sql,key)
+    #    query = self.dbe(sql_in)
+    #    dates,values = [],[]
+    #
+    #    for result in query:
+    #        dates.append(result[0])
+    #        values.append(result[1])
+    #    return values,dates
 
     
+
     def aggregate_by_plist(self,plist,key,prefilter=False):
         n_rows = len(plist)
         n_col = self.n_days
@@ -124,8 +133,13 @@ class DataProc():
         output_dates = list(ndt.tolist() for ndt in np_dt_list)
         return list(total),output_dates
 
-
     def get_index_matrix(self):
+        """
+        Generates a numpy boolean matrix for all tracked pages
+        row is pindex,column is tracked term/tab
+        creates dictionaries for 2-way lookups
+        """
+        
         if self.dbsession.pindex_lookup is None:
             self.dbsession.create_lookups()
         pindex_list = self.dbsession.pterm_lookup.keys()
@@ -177,7 +191,7 @@ class DataProc():
 
         
 class TimeSeries():
-    def __init__(self,dates,values):
+    def __init__(self,dates,values,name="Series"):
         if len(dates) != len(values):
             print "WARNING: date/value mismatch!"
             #if len(dates) > len(values):
@@ -192,12 +206,15 @@ class TimeSeries():
 
         self.set_dates(dates)
         self.set_data(values)
-        self.name = "Series"
+        self.name = name
         
     def set_dates(self,dt_list):
         if len(dt_list) == 0:
             self.dates = []
             self.missing = []
+            self.start_dt = None
+            self.end_dt = None
+            self.n_days = None
             return
         self.start_dt = dt_list[0]
         self.end_dt = dt_list[-1]
@@ -220,6 +237,7 @@ class TimeSeries():
         dt_full =list(self.start_dt + datetime.timedelta(days=i) for i in range(self.n_days))
         return dt_full
 
+    #no longer used
     def median_filter(self,threshold=5):
         signal = np.array(self.data)
         difference = np.abs(signal - np.median(signal))
@@ -233,6 +251,7 @@ class TimeSeries():
         signal[mask] = np.median(signal)
         return list(signal)
 
+    #no longer used
     def rolling_median_filter(self,window=11,sigcut=10):
         if len(self.data) == 0:
             return []
@@ -263,13 +282,16 @@ class TimeSeries():
         return list(dat)
 
     def arima_model(self,dates,values):
+        if len(values) == 0:
+            return [],[],[]
         pdf = pd.DataFrame(values)
         pdf.index = pd.to_datetime(dates)
-        result = seasonal_decompose(pdf, model='multiplicative',two_sided=False,extrapolate_trend=30)
+        result = seasonal_decompose(pdf, model='multiplicative',two_sided=False)
         trend =  result.trend[0].tolist()
         resid = result.resid[0].tolist()
         seasonal = result.seasonal[0].tolist()
         """
+        testing code for parameter tuning
         from statsmodels.tsa.statespace.sarimax import SARIMAX
         from matplotlib import pyplot as plt
         train = pdf.ix[0:365,0]
@@ -300,6 +322,9 @@ class TimeSeries():
         return trend,resid,seasonal
     
     def show(self):
+        if self.end_dt is None:
+            print "No data in series!"
+            return
         n_days = (self.end_dt - self.start_dt).days + 1
         dates = list((self.start_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days))
         print "%12s %12s %6s %6s" % ("   DATE   ","  Value  "," Missing "," Invalid ")
@@ -307,41 +332,9 @@ class TimeSeries():
         for i in range(n_days):
             print "%12s %12f %6s" % (dates[i],self.data[i],missing[i])
 
-    def ts_to_array(self,ts_list):
-        # takes a list of timeseries and creates a numpy structured array
-        # allows for missing data, shifted series, etc.
-        dates_list = []
-        for ts in ts_list:
-            dates_list = dates_list + ts.dates
-        dates_list = list(set(dates_list))
-        dates_list.sort()
-        date_lookup = {}
-        for di,dt in enumerate(dates_list):
-            date_lookup[dt] = di
-        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
-        n_col = len(dates_list)
-        n_row = len(ts_list)
-        arr = np.ones((n_row,n_col),dtype=np.float64) * np.nan
-        for ti,ts in enumerate(ts_list):
-            d = ts.dates
-            v = ts.data
-            for di,dt in enumerate(d):
-                coli = date_lookup[dt]
-                arr[ti,coli] = v[di]
-        return arr,dates_list
             
 
-    def arr_show(self,arr,dates_list):
-        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
-        if len(dates_str) > 5:
-            print "TS ARRAY     %12s %12s %12s . . . %12s %12s %12s" % (dates_str[0],dates_str[1],dates_str[2],
-                                                                        dates_str[-3],dates_str[-2],dates_str[-1])
-            for row in arr:
-                print "    series   %12.2f %12.2f %12.2f . . . %12.2f %12.2f %12.2f" % (row[0],row[1],row[2],
-                                                                                      row[-3],row[-2],row[-2])
-        else:
-            print dates_str
-            print arr
+
         
 class AggScheme():
     def __init__(self):
@@ -423,25 +416,254 @@ class AggScheme():
             n_pages = len(group_pages)
             print "    Group: %20s  contains %5d pages." % (group_name,n_pages) 
                        
-            
-    def filter(self,plist):
-        filter_set = set(plist)
-        output_list = []
-        for gdict in self.scheme["groups"]:
-            gname = gdict['group_name']
-            input_pages = gdict['group_pages']
-            output_pages = list(filter_set.intersection(set(gdict['group_pages'])))
-            if len(output_pages) > 0:
-                output_list.append({'group_name':gname,'group_pages':output_pages})
-        self.scheme["groups"] = output_list
-
-
     def get_page_weights(self,proc):
         """
-        *** Propriatary Algorithm ***
+        Pages are weighted as follows:
+        1) all pages for that contain a tracked term are grouped, the sum of all tracked terms is 
+           taken as a vector that is normalized.  This vector represents the global vector for all pages.
+        2) the same vector is calculated for all pages in an aggregation group
+        3) the same vector is calculated for a given page
+        4) the raw page weight is the difference between the cosine of an individual page and 
+           the cosine of the page to the global vector for all pages
+        5) the raw weight is clipped to zero and the resulting values normalized (max=1.0) 
         """
+        print "Calculating page weights"
+        mat = proc.index_mat
+        tracked_terms = self.tracked_tindex
+        #get all tracked terms as matrix indexes
+        tracked_mati = list(proc.t2i[term] for term in tracked_terms)
+        tracked_mask = np.array(list(index in tracked_mati for index in range(mat.shape[1])))
+        has_track = np.nansum(mat[:,tracked_mask],axis=1) > 0
+        tracked_pages = mat[has_track,:]
+        tracked_pages = tracked_pages[:,tracked_mask]
+        all_page_sum = np.nansum(tracked_pages,axis=0)
+        ap_len = np.linalg.norm(all_page_sum)
+        all_page_vect = all_page_sum/ap_len
+        for gdict in self.scheme["groups"]:
+            group_name = gdict["group_name"]
+            group_pi = list(proc.p2i[pindex] for pindex in gdict["group_pages"])
+            group_submat = mat[group_pi,:]
+            group_submat = group_submat[:,tracked_mask]
+            group_page_sum = np.nansum(group_submat,axis=0)
+            gp_len = np.linalg.norm(group_page_sum)
+            group_page_vect = group_page_sum/gp_len
+            group_all_sim = np.dot(group_page_vect,all_page_vect)
+            raw_page_weights = []
+            for pindex in gdict["group_pages"]:
+                page_row = mat[proc.p2i[pindex]].copy()
+                page_row = page_row[tracked_mask]
+                pr_len = np.linalg.norm(page_row)
+                page_vect = page_row/pr_len
+                cos1 = np.dot(all_page_vect,page_vect)
+                cos2 = np.dot(group_page_vect,page_vect)
+                net_diff = np.clip(cos2-group_all_sim,0.0,1.0)
+                raw_page_weights.append(net_diff)
+            raw_max = np.amax(raw_page_weights)
+            scaled_weights = list(weight/raw_max for weight in raw_page_weights)
+            gdict["weights"] = scaled_weights
 
-    def agg_remove_spikes(self,proc,plist,metric,cutoff=0.5,sigcut=10.0,hardcut=5000):
+
+
+
+class AggFunc():
+    """
+    Collection of functions for aggregating, weighting, and filtering TimeSeries objects
+    """
+    def __init__(self):
+        pass
+
+
+
+
+
+    
+    def agg_remove_spikes(self,proc,plist,metric,cutoff=0.5,sigcut=10.0,hardcut=5000,remove_scroll=True):
         """
-        *** Propriatary Algorithm ***
+        First get aggregated data for all in plist, then compare each individual
+        time series and check for values above three cutoffs: 1) more than (cutoff) of daily 
+        agg total, 2) more than (sigcut) stddev above timeseries values, 3) more than (hardcut) absvalue
+        --> flagged values set series median
         """
+        print "AGGREGATION WITH SPIKE REMOVAL:"
+        ts_list = []
+        for pi,pindex in enumerate(plist):
+            d,v = proc.get_timeseries_pindex(pindex,metric)
+            if remove_scroll:
+                ed,ev = proc.get_timeseries_pindex(pindex,"scroll_events")
+                dnet,vnet = d,self.tsa_arith(d,v,ed,ev,opp="subtract")
+                ts = TimeSeries(dnet,vnet)
+                ts_list.append(ts)
+            else:
+                ts = TimeSeries(d,v)
+                ts_list.append(ts)
+        if len(ts_list) == 0:
+            return [],[]
+
+        agg_ts,agg_dates = self.ts_to_array(ts_list)
+        with np.errstate(invalid='ignore'):
+            daily_totals = np.nansum(agg_ts,axis=0)
+            series_means = np.nanmean(agg_ts,axis=1)
+            series_medians = np.nanmedian(agg_ts,axis=1)
+            series_std = np.nanstd(agg_ts,axis=1)
+            series_max = sigcut*series_std+series_means
+            daily_max = np.nanmax(agg_ts,axis=0) * cutoff
+            date_str =  list(dt.strftime("%Y-%m-%d") for dt in agg_dates)
+            horiz_spike = np.greater(agg_ts,series_max[:,None])
+            vert_spike = np.greater(agg_ts,daily_max[None,:])
+            hard_cut = agg_ts > hardcut
+            total_spike = np.logical_and(horiz_spike,np.logical_and(vert_spike,hard_cut))
+            spike_index = np.nonzero(total_spike)
+            si_pairs = zip(list(spike_index[0]),list(spike_index[1]))
+            for ri,ci in si_pairs:
+                print "   clipping series %6g on %11s from %7g to %7g" % (plist[ri],date_str[ci],agg_ts[ri,ci],daily_max[ci])
+                agg_ts[ri,ci] = series_medians[ri]
+        return agg_ts,agg_dates
+
+
+
+    
+    def ts_to_array(self,ts_list):
+        # takes a list of timeseries and creates a numpy structured array
+        # allows for missing data, shifted series, etc.
+        # returns np array and a list of dates for each column
+        dates_list = []
+        for ts in ts_list:
+            dates_list = dates_list + ts.dates
+        dates_list = list(set(dates_list))
+        dates_list.sort()
+        date_lookup = {}
+        for di,dt in enumerate(dates_list):
+            date_lookup[dt] = di
+        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
+        n_col = len(dates_list)
+        n_row = len(ts_list)
+        arr = np.ones((n_row,n_col),dtype=np.float64) * np.nan
+        for ti,ts in enumerate(ts_list):
+            d = ts.dates
+            v = ts.data
+            for di,dt in enumerate(d):
+                coli = date_lookup[dt]
+                arr[ti,coli] = v[di]
+        return arr,dates_list
+
+
+
+    def tsa_arith(self,dates1, vals1, dates2, vals2,opp="subtract"):
+        """  
+        Takes two timeseries as lists, one dates, other values.
+        Arithmetic is "add, subtract, multiply, divide" a new list of values for list 1 returned
+        Each date/vals pair must be aligned (same length).  If values are missing from the 2nd date/val
+        pair, the original value is returned unchanged
+        
+        """
+        if opp not in ["add","subtract","multiply","divide"]:
+            print 'ERROR, operator not recognized as one of "add","subtract","multiply","divide"'
+            return list(x for x in vals1)
+        if len(dates1) != len(vals1):
+            print "ERROR, incorrect input format for dates,values!"
+            return list(x for x in vals1)
+        v2lookup = {}
+        for d2index,d2date in enumerate(dates2):
+            v2lookup[d2date] = vals2[d2index]
+        #fill in list with appropriate null values
+        if opp == "subtract" or opp == "add":
+            null_val = 0.0
+        elif opp == "multiply" or opp == "divide":
+            null_val == 1.0
+        #what are we adding/subtracting/etc?    
+        left_val = list(v2lookup.get(date,null_val) for date in dates1)
+        if opp == 'add':
+            out_val = list(vals1[i] + left_val[i] for i in range(len(vals1)))
+        if opp == 'subtract':
+            out_val = list(vals1[i] - left_val[i] for i in range(len(vals1)))
+        if opp == 'multiply':
+            out_val = list(vals1[i] * left_val[i] for i in range(len(vals1)))
+        if opp == 'divide':
+            #quick check for zero division
+            out_val = list(vals1[i] / left_val[i] if left_val[i] != 0.0 else vals1[i] for i in range(len(vals1)))
+        return out_val
+
+    
+    def weight_pages(self,ts_array,agg_scheme,target):
+        """
+        Input:
+           ts_array = numpy array of timeseries (row=page, col=date) 
+           agg_scheme = AggScheme instance with page weights
+           target is "group_name" from AggScheme
+        """
+        for gdict in agg_scheme.scheme["groups"]:
+            if gdict["group_name"] == target:
+                arr_copy = ts_array.copy()
+                weights = gdict.get("weights",None)
+                if weights is None:
+                    print "ERROR, no page weights in place, call get_page_weights() first!"
+                    return ts_array
+                np_weights = np.array(weights)
+                assert np_weights.shape[0] == arr_copy.shape[0]
+                scaled_array = arr_copy*np_weights[:,None]
+                return scaled_array
+        #if not group not found    
+        print "ERROR, target %s not in aggregation scheme!" % target
+        return ts_array
+
+    def agg_by_month(self,values,dt_list):
+        """
+        For the moment, try pandas grouping feature, return list of str(Month year) and list of data
+
+        """
+        pd_dates = pd.to_datetime(dt_list)
+        pdf = pd.DataFrame(pd_dates, columns=['date'])
+        pdf["data"] = values
+        by_month = pdf.groupby(pd.Grouper(key='date',freq='M')).sum()
+        by_month.index = by_month.index.strftime('%b-%Y')
+        return list(by_month.index),list(by_month.data)
+
+    def arr_show(self,arr,dates_list):
+        dates_str = list(dt.strftime("%Y-%m-%d") for dt in dates_list)
+        if len(dates_str) > 5:
+            print "TS ARRAY     %12s %12s %12s . . . %12s %12s %12s" % (dates_str[0],dates_str[1],dates_str[2],
+                                                                        dates_str[-3],dates_str[-2],dates_str[-1])
+            for row in arr:
+                print "    series   %12.2f %12.2f %12.2f . . . %12.2f %12.2f %12.2f" % (row[0],row[1],row[2],
+                                                                                      row[-3],row[-2],row[-2])
+        else:
+            print dates_str
+            print arr
+
+
+    def get_searchterm_counts(self,agg_scheme,dt_list,db_session,target="clicks"):
+        """
+        for all terms in an aggregation scheme, tally and weight hits from search queries
+        by day, convert to time_series, returns a dict of gterm-->[dates,values]
+        """
+        search_counts = {}
+        ugroup_names = set(gdict["group_name"].lower() for gdict in agg_scheme.scheme["groups"])
+        for dt in dt_list:
+            sql_dt = dt.strftime("%Y-%m-%d %H-%M-%S")
+            sql = 'SELECT sterm,count FROM searchdata WHERE `key`="%s" and date="%s"' % (target,sql_dt)
+            results = db_session.session.execute(sql).fetchall()
+            sterms = list(tup[0] for tup in results)
+            scounts = list(tup[1] for tup in results)
+            term_counts = {}
+            #scan search string for words matching group names
+            #no accounting for variations or misspellings
+            for si,sterm in enumerate(sterms):
+                terms = set(sterm.split())
+                hits = []
+                for gterm in ugroup_names:
+                    if gterm in terms:
+                        hits.append((gterm,scounts[si]))
+                if len(hits)>0:
+                    n_hits = float(len(hits))
+                    for gterm,counts in hits:
+                        tc = term_counts.get(gterm,0.0)
+                        tc = tc + counts/n_hits #spread clicks across all matched terms
+                        term_counts[gterm] = tc
+            search_counts[dt] = term_counts
+        #search_counts is dictionary by date, convert to timeseries
+        search_ts = {}
+        for gname in ugroup_names:
+            g_counts = list(search_counts[dt].get(gname,0.0) for dt in dt_list)
+            search_ts[gname] = [dt_list,g_counts]
+        return search_ts
+

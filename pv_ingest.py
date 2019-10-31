@@ -1,4 +1,4 @@
-import sys,os,time,datetime,pickle
+import sys,os,time,datetime,pickle,json
 import pandas as pd
 import numpy as np
 from googleapiclient import discovery
@@ -194,6 +194,7 @@ class Ingest:
                     pv_df = self.get_pageviews(ga_metrics,date_str,date_str)
                     time.sleep(1) # slow down API queries
                 for field in ga_fields:
+                    print "Storing data for",date_str,field
                     db_session.store_pv_df(pv_df,field,sql_timestr,"pageviews")
 
             # EVENTS
@@ -307,4 +308,28 @@ class Utils:
     
         df = pd.DataFrame(dlist)
         return df
+    
+    def ts2json(self,mo_ts_lists,mo_dates,group_names,output_file="test.json"):
+        """
+        Takes a list of lists where each sublist are monthly agg values"
+        mo_dates is list of month strings (column names)
+        group_names is a list of agg_groups (row names)
+        hack for custom JSON format for VP fronent
+        """
+        json_dlist = []
+        np_month = np.array(mo_ts_lists)
+        for mi,mo_str in enumerate(mo_dates):
+            mdict = {}
+            mdict["MONTH"] = mo_str
+            for gi,gname in enumerate(group_names):
+                mdict[gname] = np_month[gi,mi]
+            json_dlist.append(json.dumps(mdict))
+        f = open(output_file,'w')
+        print >> f,"[", #prepend bracket
+        for di,d in enumerate(json_dlist):
+            print >> f,d,#actual json
+            if di < len(json_dlist)-1:
+                print >> f,",", #add comma if not last element
 
+        print >> f,"]\n" #postpend bracket and newline
+        f.close()
