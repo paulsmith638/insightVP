@@ -418,52 +418,8 @@ class AggScheme():
                        
     def get_page_weights(self,proc):
         """
-        Pages are weighted as follows:
-        1) all pages for that contain a tracked term are grouped, the sum of all tracked terms is 
-           taken as a vector that is normalized.  This vector represents the global vector for all pages.
-        2) the same vector is calculated for all pages in an aggregation group
-        3) the same vector is calculated for a given page
-        4) the raw page weight is the difference between the cosine of an individual page and 
-           the cosine of the page to the global vector for all pages
-        5) the raw weight is clipped to zero and the resulting values normalized (max=1.0) 
+        PROPRIATARY CODE, REMOVED FROM PUBLIC REPOSITORY
         """
-        print "Calculating page weights"
-        mat = proc.index_mat
-        tracked_terms = self.tracked_tindex
-        #get all tracked terms as matrix indexes
-        tracked_mati = list(proc.t2i[term] for term in tracked_terms)
-        tracked_mask = np.array(list(index in tracked_mati for index in range(mat.shape[1])))
-        has_track = np.nansum(mat[:,tracked_mask],axis=1) > 0
-        tracked_pages = mat[has_track,:]
-        tracked_pages = tracked_pages[:,tracked_mask]
-        all_page_sum = np.nansum(tracked_pages,axis=0)
-        ap_len = np.linalg.norm(all_page_sum)
-        all_page_vect = all_page_sum/ap_len
-        for gdict in self.scheme["groups"]:
-            group_name = gdict["group_name"]
-            group_pi = list(proc.p2i[pindex] for pindex in gdict["group_pages"])
-            group_submat = mat[group_pi,:]
-            group_submat = group_submat[:,tracked_mask]
-            group_page_sum = np.nansum(group_submat,axis=0)
-            gp_len = np.linalg.norm(group_page_sum)
-            group_page_vect = group_page_sum/gp_len
-            group_all_sim = np.dot(group_page_vect,all_page_vect)
-            raw_page_weights = []
-            for pindex in gdict["group_pages"]:
-                page_row = mat[proc.p2i[pindex]].copy()
-                page_row = page_row[tracked_mask]
-                pr_len = np.linalg.norm(page_row)
-                page_vect = page_row/pr_len
-                cos1 = np.dot(all_page_vect,page_vect)
-                cos2 = np.dot(group_page_vect,page_vect)
-                net_diff = np.clip(cos2-group_all_sim,0.0,1.0)
-                raw_page_weights.append(net_diff)
-            raw_max = np.amax(raw_page_weights)
-            scaled_weights = list(weight/raw_max for weight in raw_page_weights)
-            gdict["weights"] = scaled_weights
-
-
-
 
 class AggFunc():
     """
@@ -479,49 +435,8 @@ class AggFunc():
     
     def agg_remove_spikes(self,proc,plist,metric,cutoff=0.5,sigcut=10.0,hardcut=5000,remove_scroll=True):
         """
-        First get aggregated data for all in plist, then compare each individual
-        time series and check for values above three cutoffs: 1) more than (cutoff) of daily 
-        agg total, 2) more than (sigcut) stddev above timeseries values, 3) more than (hardcut) absvalue
-        --> flagged values set series median
+        PROPRIATARY CODE, REMOVED FROM PUBLIC REPOSITORY
         """
-        print "AGGREGATION WITH SPIKE REMOVAL:"
-        ts_list = []
-        for pi,pindex in enumerate(plist):
-            d,v = proc.get_timeseries_pindex(pindex,metric)
-            if remove_scroll:
-                ed,ev = proc.get_timeseries_pindex(pindex,"scroll_events")
-                dnet,vnet = d,self.tsa_arith(d,v,ed,ev,opp="subtract")
-                ts = TimeSeries(dnet,vnet)
-                ts_list.append(ts)
-            else:
-                ts = TimeSeries(d,v)
-                ts_list.append(ts)
-        if len(ts_list) == 0:
-            return [],[]
-
-        agg_ts,agg_dates = self.ts_to_array(ts_list)
-        with np.errstate(invalid='ignore'):
-            daily_totals = np.nansum(agg_ts,axis=0)
-            series_means = np.nanmean(agg_ts,axis=1)
-            series_medians = np.nanmedian(agg_ts,axis=1)
-            series_std = np.nanstd(agg_ts,axis=1)
-            series_max = sigcut*series_std+series_means
-            daily_max = np.nanmax(agg_ts,axis=0) * cutoff
-            date_str =  list(dt.strftime("%Y-%m-%d") for dt in agg_dates)
-            horiz_spike = np.greater(agg_ts,series_max[:,None])
-            vert_spike = np.greater(agg_ts,daily_max[None,:])
-            hard_cut = agg_ts > hardcut
-            total_spike = np.logical_and(horiz_spike,np.logical_and(vert_spike,hard_cut))
-            spike_index = np.nonzero(total_spike)
-            si_pairs = zip(list(spike_index[0]),list(spike_index[1]))
-            for ri,ci in si_pairs:
-                print "   clipping series %6g on %11s from %7g to %7g" % (plist[ri],date_str[ci],agg_ts[ri,ci],daily_max[ci])
-                agg_ts[ri,ci] = series_medians[ri]
-        return agg_ts,agg_dates
-
-
-
-    
     def ts_to_array(self,ts_list):
         # takes a list of timeseries and creates a numpy structured array
         # allows for missing data, shifted series, etc.
