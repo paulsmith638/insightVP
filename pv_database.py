@@ -248,15 +248,23 @@ class DBsession:
             else:
                 mterm = "sterm"
                 print "Removing Duplicates from searchdata"
-            
-            sql = "DELETE FROM %s WHERE id IN " % table + \
-                  "(WITH duplicates AS (SELECT MAX(id) AS " + \
+            #first generate list of records matching all fields where id < max(id)
+            sql = "WITH duplicates AS (SELECT MAX(id) AS " + \
                   "lastId,%s,date,`key` FROM %s GROUP BY %s,date,`key` HAVING count(*) > 1)," % (mterm,table,mterm) + \
                   "dupId AS (SELECT id FROM %s INNER JOIN duplicates on %s.%s = duplicates.%s " % (table,table,mterm,mterm) + \
                   "AND %s.date = duplicates.date AND %s.`key` = duplicates.`key` " % (table,table) + \
-                  "WHERE %s.id < duplicates.lastId) SELECT * FROM dupId)" % table
-            print sql
-            #self.session.execute(sql)
+                  "WHERE %s.id < duplicates.lastId) SELECT * FROM dupId" % table
+            result = self.session.execute(sql).fetchall()
+            id_list = list(t[0] for t in result)
+            #delete in small batches to avoid deadlocks
+            if len(id_list) > 0:
+                batch_size = min(len(id_list),10)
+                for i in range(0,len(id_list),batch_size):
+                    to_del = id_list[i:i+batch_size]
+                    as_sql = "("+",".join(list("%d" % idx for idx in to_del))+")"
+                    sql = "DELETE FROM %s WHERE id IN %s" % (table,as_sql)
+                    self.session.execute(sql)
+            print "   --> %g records removed" % len(id_list)
 
             
     def store_pv_df(self,pv_df,field,sql_timestr,frame_type):

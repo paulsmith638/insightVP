@@ -1,5 +1,5 @@
-import sys,os,time,datetime,pickle,csv
-from statsmodels.tsa.seasonal import seasonal_decompose
+import sys,os,time,datetime,pickle,csv,re
+#from statsmodels.tsa.seasonal import seasonal_decompose
 import numpy as np
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -10,7 +10,6 @@ from sqlalchemy.ext.declarative import declarative_base
 from pv_database import DBsession
 import pandas as pd
 
-tracked_types_csv_file="tracked_types_cats.csv"
 
 class DataProc():
     def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,database):
@@ -360,13 +359,18 @@ class AggScheme():
         with open(csv_in,'r') as track_f:
             reader = csv.reader(track_f,delimiter=',')
             header = next(reader)
-            rows = [(row[0], list(int(row[i]) for i in range(1,len(row)) if len(row[i]) > 0)) for row in reader]
+            hd_str = list(s.upper() for s in header)
+            if "MASTER" in hd_str:
+                rows = [(row[0].strip(), row[1].upper().strip(), list(int(row[i]) for i in range(2,len(row)) if len(row[i]) > 0)) for row in reader]
+            else:
+                rows = [(row[0].strip(), "None", list(int(row[i]) for i in range(1,len(row)) if len(row[i]) > 0)) for row in reader]
         track_lookup = {}
         for track_t in rows:
             track_name = track_t[0]
-            tindex_include = list(tindex for tindex in track_t[1] if tindex > 0)
-            tindex_exclude = list(-tindex for tindex in track_t[1] if tindex < 0)
-            track_lookup[track_name] = {"include":tindex_include,"exclude":tindex_exclude}
+            track_master = track_t[1]
+            tindex_include = list(tindex for tindex in track_t[2] if tindex > 0)
+            tindex_exclude = list(-tindex for tindex in track_t[2] if tindex < 0)
+            track_lookup[track_name] = {"include":tindex_include,"exclude":tindex_exclude,"master":track_master}
         tracked_tindex = []
         for tdict in track_lookup.values():
             for tindex in tdict["include"]:
@@ -383,6 +387,7 @@ class AggScheme():
                     self.tracked_tindex_pages[tindex] = plist
         for gname,tdict in track_lookup.iteritems():
             group_name = gname
+            group_master = tdict["master"]
             tracked_pages = []
             excluded_pages = []
             for tindex in tdict["include"]:
@@ -393,7 +398,7 @@ class AggScheme():
             excluded_pages = set(excluded_pages)
             final_pages = list(tracked_pages - excluded_pages)
             if len(self.scheme["groups"]) == 0:
-                gdict = {"group_name":group_name,"group_pages":final_pages}
+                gdict = {"group_name":group_name,"group_pages":final_pages,"group_master":group_master}
                 self.scheme["groups"].append(gdict)
             else:
                 existing_groups = list(gdict["group_name"] for gdict in self.scheme["groups"])
@@ -402,7 +407,7 @@ class AggScheme():
                         if gdict["group_name"] == group_name:
                             gdict["group_pages"] = list(set(gdict["group_pages"] + final_pages))
                 else:
-                    gdict = {"group_name":group_name,"group_pages":final_pages}
+                    gdict = {"group_name":group_name,"group_pages":final_pages,"group_master":group_master}
                     self.scheme["groups"].append(gdict) 
                     
 
@@ -413,13 +418,58 @@ class AggScheme():
         for gn,gdict in enumerate(self.scheme["groups"]):
             group_name = gdict["group_name"]
             group_pages = gdict["group_pages"]
+            group_master = gdict["group_master"]
             n_pages = len(group_pages)
-            print "    Group: %20s  contains %5d pages." % (group_name,n_pages) 
+            print "    Group: %20s = %8s contains %5d pages." % (group_name,group_master,n_pages) 
                        
     def get_page_weights(self,proc):
         """
-        PROPRIATARY CODE, REMOVED FROM PUBLIC REPOSITORY
+        Pages are weighted as follows:
+        1) all pages for that contain a tracked term are grouped, the sum of all tracked terms is 
+           taken as a vector that is normalized.  This vector represents the global vector for all pages.
+        2) the same vector is calculated for all pages in an aggregation group
+        3) the same vector is calculated for a given page
+        4) the raw page weight is the difference between the cosine of an individual page and 
+           the cosine of the page to the global vector for all pages
+        5) the raw weight is clipped to zero and the resulting values normalized (max=1.0) 
         """
+        print "Calculating page weights"
+        mat = proc.index_mat
+        tracked_terms = self.tracked_tindex
+        #get all tracked terms as matrix indexes
+        tracked_mati = list(proc.t2i[term] for term in tracked_terms)
+        tracked_mask = np.array(list(index in tracked_mati for index in range(mat.shape[1])))
+        has_track = np.nansum(mat[:,tracked_mask],axis=1) > 0
+        tracked_pages = mat[has_track,:]
+        tracked_pages = tracked_pages[:,tracked_mask]
+        all_page_sum = np.nansum(tracked_pages,axis=0)
+        ap_len = np.linalg.norm(all_page_sum)
+        all_page_vect = all_page_sum/ap_len
+        for gdict in self.scheme["groups"]:
+            group_name = gdict["group_name"]
+            group_pi = list(proc.p2i[pindex] for pindex in gdict["group_pages"])
+            group_submat = mat[group_pi,:]
+            group_submat = group_submat[:,tracked_mask]
+            group_page_sum = np.nansum(group_submat,axis=0)
+            gp_len = np.linalg.norm(group_page_sum)
+            group_page_vect = group_page_sum/gp_len
+            group_all_sim = np.dot(group_page_vect,all_page_vect)
+            raw_page_weights = []
+            for pindex in gdict["group_pages"]:
+                page_row = mat[proc.p2i[pindex]].copy()
+                page_row = page_row[tracked_mask]
+                pr_len = np.linalg.norm(page_row)
+                page_vect = page_row/pr_len
+                cos1 = np.dot(all_page_vect,page_vect)
+                cos2 = np.dot(group_page_vect,page_vect)
+                net_diff = np.clip(cos2-group_all_sim,0.0,1.0)
+                raw_page_weights.append(net_diff)
+            raw_max = np.amax(raw_page_weights)
+            scaled_weights = list(weight/raw_max for weight in raw_page_weights)
+            gdict["weights"] = scaled_weights
+
+
+
 
 class AggFunc():
     """
@@ -435,8 +485,54 @@ class AggFunc():
     
     def agg_remove_spikes(self,proc,plist,metric,cutoff=0.5,sigcut=10.0,hardcut=5000,remove_scroll=True):
         """
-        PROPRIATARY CODE, REMOVED FROM PUBLIC REPOSITORY
+        First get aggregated data for all in plist, then compare each individual
+        time series and check for values above three cutoffs: 1) more than (cutoff) of daily 
+        agg total, 2) more than (sigcut) stddev above timeseries values, 3) more than (hardcut) absvalue
+        --> flagged values set series median
         """
+        print "AGGREGATION WITH SPIKE REMOVAL:"
+        ts_list = []
+        for pi,pindex in enumerate(plist):
+            d,v = proc.get_timeseries_pindex(pindex,metric)
+            if remove_scroll:
+                ed,ev = proc.get_timeseries_pindex(pindex,"scroll_events")
+                dnet,vnet = d,self.tsa_arith(d,v,ed,ev,opp="subtract")
+                ts = TimeSeries(dnet,vnet)
+                ts_list.append(ts)
+            else:
+                ts = TimeSeries(d,v)
+                ts_list.append(ts)
+        if len(ts_list) == 0:
+            return [],[]
+
+        agg_ts,agg_dates = self.ts_to_array(ts_list)
+        with np.errstate(invalid='ignore'):
+            daily_totals = np.nansum(agg_ts,axis=0)
+            series_medians = np.nanmedian(agg_ts,axis=1)
+            #exclude max point for mean/std calculation
+            series_top = np.nanmax(agg_ts,axis=1)
+            mask = np.equal(agg_ts,series_top[:,None])
+            to_check = agg_ts.copy()
+            to_check[mask] = np.nan
+            series_means = np.nanmean(to_check,axis=1)
+            series_std = np.nanstd(to_check,axis=1)
+            series_max = sigcut*series_std+series_means
+            daily_max = np.nanmax(agg_ts,axis=0) * cutoff
+            date_str =  list(dt.strftime("%Y-%m-%d") for dt in agg_dates)
+            horiz_spike = np.greater(agg_ts,series_max[:,None])
+            vert_spike = np.greater(agg_ts,daily_max[None,:])
+            hard_cut = agg_ts > hardcut
+            total_spike = np.logical_and(horiz_spike,np.logical_and(vert_spike,hard_cut))
+            spike_index = np.nonzero(total_spike)
+            si_pairs = zip(list(spike_index[0]),list(spike_index[1]))
+            for ri,ci in si_pairs:
+                print "   clipping series %6g on %11s from %7g to %7g" % (plist[ri],date_str[ci],agg_ts[ri,ci],daily_max[ci])
+                agg_ts[ri,ci] = series_medians[ri]
+        return agg_ts,agg_dates
+
+
+
+    
     def ts_to_array(self,ts_list):
         # takes a list of timeseries and creates a numpy structured array
         # allows for missing data, shifted series, etc.
@@ -546,15 +642,20 @@ class AggFunc():
             print arr
 
 
-    def get_searchterm_counts(self,agg_scheme,dt_list,db_session,target="clicks"):
+    def get_searchterm_counts(self,agg_scheme,db_session,target="clicks"):
         """
         for all terms in an aggregation scheme, tally and weight hits from search queries
         by day, convert to time_series, returns a dict of gterm-->[dates,values]
         """
+        sql = "SELECT DISTINCT date FROM searchdata"
+        dres = db_session.session.execute(sql).fetchall()
+        dt_list = list(t[0] for t in dres)
+        dt_list.sort()
         search_counts = {}
         ugroup_names = set(gdict["group_name"].lower() for gdict in agg_scheme.scheme["groups"])
+        print "Fetching Search Term Data for",target
         for dt in dt_list:
-            sql_dt = dt.strftime("%Y-%m-%d %H-%M-%S")
+            sql_dt = dt
             sql = 'SELECT sterm,count FROM searchdata WHERE `key`="%s" and date="%s"' % (target,sql_dt)
             results = db_session.session.execute(sql).fetchall()
             sterms = list(tup[0] for tup in results)
@@ -566,7 +667,15 @@ class AggFunc():
                 terms = set(sterm.split())
                 hits = []
                 for gterm in ugroup_names:
-                    if gterm in terms:
+                    #some terms are composite, must match all words
+                    #in group name to search string
+                    #e.g. cabernet sauvignon
+                    gbreak = gterm.split()
+                    num_match = 0
+                    for i in range(len(gbreak)):
+                        if gbreak[i] in terms:
+                            num_match = num_match + 1
+                    if num_match >= len(gbreak):
                         hits.append((gterm,scounts[si]))
                 if len(hits)>0:
                     n_hits = float(len(hits))
