@@ -117,7 +117,12 @@ class DBsession:
         for result in ttype_query:
             self.ttype_lookup[result[0]] = result[1]
 
+        #reverse lookup for slug
+        self.pi2slug = {}
+        for slug,pindex in self.pindex_lookup.iteritems():
+            self.pi2slug[pindex] = slug
 
+            
     def ingest_wordpress_tax(self,wordpress_db):
         sql_connect  =  'mysql://%s:%s@localhost:%s/%s' % (self.login,self.password,self.port,wordpress_db)
         read_engine = create_engine(sql_connect)
