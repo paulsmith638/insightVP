@@ -309,21 +309,38 @@ class Utils:
         df = pd.DataFrame(dlist)
         return df
     
-    def ts2json(self,mo_ts_lists,mo_dates,group_names,output_file="test.json"):
+    def ts2json(self,mo_ts_lists,mo_date_lists,group_names,output_file="test.json"):
         """
         Takes a list of lists where each sublist are monthly agg values"
         mo_dates is list of month strings (column names)
         group_names is a list of agg_groups (row names)
-        hack for custom JSON format for VP fronent
+        hack for custom JSON format for VP fronend (amCharts v4)
         """
         json_dlist = []
-        np_month = np.array(mo_ts_lists)
-        for mi,mo_str in enumerate(mo_dates):
+        all_months = list(set(list(item for sublist in mo_date_lists for item in sublist)))
+        all_months.sort(key = lambda mY: datetime.datetime.strptime(mY,"%b-%Y"))
+        for month in all_months:
             mdict = {}
-            mdict["MONTH"] = mo_str
-            for gi,gname in enumerate(group_names):
-                mdict[gname] = np_month[gi,mi]
-            json_dlist.append(json.dumps(mdict))
+            mdict["MONTH"] = month
+            for mi,mo_list in enumerate(mo_date_lists):
+                gname = group_names[mi]
+                output = []
+                for word in gname.split():
+                    lword = word.strip().lower()
+                    if lword == "ipa":
+                        cword = "IPA"
+                    else:
+                        cword = lword.capitalize()
+                    output.append(cword)
+                gname_out = " ".join(output)
+                ts = mo_ts_lists[mi]
+                if month in mo_list:
+                    si = mo_list.index(month)
+                    data = ts[si]
+                    if data != data:
+                        data = 0 #replaces NaN with 0
+                    mdict[gname_out] = data
+            json_dlist.append(json.dumps(mdict,indent=5))
         f = open(output_file,'w')
         print >> f,"[", #prepend bracket
         for di,d in enumerate(json_dlist):
