@@ -309,43 +309,54 @@ class Utils:
         df = pd.DataFrame(dlist)
         return df
     
-    def ts2json(self,mo_ts_lists,mo_date_lists,group_names,output_file="test.json"):
+    def ts2json(self,tsa,source_array,to_output,output_file="test.json",start=None,end=None,all_caps=None):
         """
-        Takes a list of lists where each sublist are monthly agg values"
-        mo_dates is list of month strings (column names)
-        group_names is a list of agg_groups (row names)
-        hack for custom JSON format for VP fronend (amCharts v4)
+        Takes a monthly TsArray object, source_array and generates custom JSON 
+        format for VP fronend (amCharts v4)
         """
-        json_dlist = []
-        all_months = list(set(list(item for sublist in mo_date_lists for item in sublist)))
-        all_months.sort(key = lambda mY: datetime.datetime.strptime(mY,"%b-%Y"))
-        for month in all_months:
+        data = tsa.arrays[source_array].copy()
+        all_month_dt = tsa.dt_list
+        if start is not None and end is not None:
+            all_dt = all_month_dt
+            start_dt = datetime.datetime.strptime(start,"%Y-%m-%d")
+            end_dt = datetime.datetime.strptime(end,"%Y-%m-%d")
+            valid_index = list(i for i in range(len(all_month_dt)) if all_dt[i] >= start_dt and all_dt[i] <= end_dt)
+            data = data[:,valid_index]
+            all_month_dt = list(all_month_dt[i] for i in valid_index)
+        all_mo_dstr = list(dt.strftime("%b-%Y") for dt in all_month_dt)
+        if all_caps is not None:
+            to_capitalize = list(word.lower() for word in all_caps)
+        else:
+            to_capitalize = []
+        #accumulate a list of dictionaries, each dictionary is one month of data
+        mo_dlist = []        
+        for mi,month in enumerate(all_mo_dstr):
             mdict = {}
             mdict["MONTH"] = month
-            for mi,mo_list in enumerate(mo_date_lists):
-                gname = group_names[mi]
+            for ri,row in enumerate(data):
+                gname = tsa.r2p[ri]
+                if gname not in to_output:
+                    continue
                 output = []
                 for word in gname.split():
                     lword = word.strip().lower()
-                    if lword == "ipa":
-                        cword = "IPA"
+                    if lword in to_capitalize:
+                        cword = lword.upper()
                     else:
                         cword = lword.capitalize()
                     output.append(cword)
                 gname_out = " ".join(output)
-                ts = mo_ts_lists[mi]
-                if month in mo_list:
-                    si = mo_list.index(month)
-                    data = ts[si]
-                    if data != data:
-                        data = 0 #replaces NaN with 0
-                    mdict[gname_out] = data
-            json_dlist.append(json.dumps(mdict,indent=5))
+                val = row[mi]
+                if val != val:
+                    val = 0.0 #replaces NaN with 0
+                mdict[gname_out] = float(val)
+            mo_dlist.append(mdict)
         f = open(output_file,'w')
         print >> f,"[", #prepend bracket
-        for di,d in enumerate(json_dlist):
-            print >> f,d,#actual json
-            if di < len(json_dlist)-1:
+        for di,d in enumerate(mo_dlist):
+            json_out=json.dumps(d,indent=5)
+            print >> f,json_out,#actual json
+            if di < len(mo_dlist)-1:
                 print >> f,",", #add comma if not last element
 
         print >> f,"]\n" #postpend bracket and newline

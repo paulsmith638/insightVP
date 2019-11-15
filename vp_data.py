@@ -8,8 +8,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import Column, Integer, Float,String, DateTime,MetaData,Table
 from sqlalchemy.ext.declarative import declarative_base
 from pv_database import DBsession
-import pandas as pd
-
 
 class DataProc():
     def __init__(self,mysql_login,mysql_pass,mysql_host,mysql_port,database,load_cache=True):
@@ -362,6 +360,27 @@ class TsArray():
             print "      Array Name   = ",name
             print "         NaN values= ",nnan
 
+
+    def summary(self):
+        tsa = self
+        series_list = tsa.p2r.keys()
+        frame_list = tsa.arrays.keys()
+        print "Data Available:"
+        for frame in frame_list:
+            darray = tsa.arrays[frame]
+            dnan = np.isnan(darray)
+            valid_col = np.count_nonzero(np.invert(dnan),axis=0)
+            valid_coli = np.nonzero(valid_col)[0]
+            valid_dt = list(tsa.c2d[ci] for ci in valid_coli)
+            dstart = valid_dt[0].strftime("%Y-%m-%d")
+            dend = valid_dt[-1].strftime("%Y-%m-%d")
+            print "   Frame %12s contains data from %s to %s" % (frame,dstart,dend)
+            for series in series_list:
+                srow = tsa.p2r[series]
+                sdat = darray[srow]
+                n_col = np.count_nonzero(np.invert(np.isnan(sdat)))
+                print "      Series %19s has %4g timepoints" % (series,n_col)        
+
     def series_summary(self,source_array,series_id):
         series = np.array(self.arrays[source_array][self.p2r[series_id]])
         nnan = np.count_nonzero(np.isnan(series))
@@ -382,152 +401,6 @@ class TsArray():
         outstr = fmtstr.format(sname,nnz,maxv,max_date,minv,min_date,mean,median,std)
         return outstr
 
-class TimeSeries():
-    def __init__(self,dates,values,name="Series"):
-        if len(dates) != len(values):
-            print "WARNING: date/value mismatch!"
-            #if len(dates) > len(values):
-            #    for i in range(len(dates) - len(values)):
-            #        values.append(0.0) # zero pad 
-            #if len(values) > len(dates):
-            #    values=values[0:len(dates)] # truncate
-        dat = zip(dates,values)
-        dat.sort(key = lambda x:x[0])
-        dates = list(dv[0] for dv in dat)
-        values = list(dv[1] for dv in dat)
-
-        self.set_dates(dates)
-        self.set_data(values)
-        self.name = name
-        
-    def set_dates(self,dt_list):
-        if len(dt_list) == 0:
-            self.dates = []
-            self.missing = []
-            self.start_dt = None
-            self.end_dt = None
-            self.n_days = None
-            return
-        self.start_dt = dt_list[0]
-        self.end_dt = dt_list[-1]
-        self.n_days = (self.end_dt - self.start_dt).days + 1
-        self.dates = self.get_all_dates() #fill in all dates
-        self.missing = np.zeros(self.n_days,dtype=np.bool_)
-        for dti,dt in enumerate(self.dates):
-            if dt not in dt_list:
-                self.missing[dti] = True
-                
-    def set_data(self,values):
-        if len(values) == 0:
-            self.data=[]
-            return
-        data = np.ones(self.missing.shape[0]) * np.nan
-        data[np.invert(self.missing)] = values
-        self.data = list(data)
- 
-    def get_all_dates(self):
-        dt_full =list(self.start_dt + datetime.timedelta(days=i) for i in range(self.n_days))
-        return dt_full
-
-    #no longer used
-    def median_filter(self,threshold=5):
-        signal = np.array(self.data)
-        difference = np.abs(signal - np.median(signal))
-        median_difference = np.median(difference)
-        if median_difference == 0:
-            s = 0
-        else:
-            s = difference / float(median_difference)
-        mask = s > threshold
-        print "FILTER",np.count_nonzero(mask)
-        signal[mask] = np.median(signal)
-        return list(signal)
-
-    #no longer used
-    def rolling_median_filter(self,window=11,sigcut=10):
-        if len(self.data) == 0:
-            return []
-        rolling_median=[]
-        np_dat = np.array(self.data)
-        tails = int(window/2)
-        for index_window in range(0,len(self.data)-2*tails,1):
-            win_dat = np_dat[index_window:index_window+window]
-            win_med = float(np.nanmedian(win_dat))
-            rolling_median.append(win_med)
-            if index_window < tails:
-                rolling_median.append(win_med)
-        for i in range(tails):
-            rolling_median.append(win_med)
-        rm_np = np.array(rolling_median)
-        diff = np_dat - rm_np #only positive differences (spikes)
-        threshold = np.nanstd(self.data) * sigcut
-        mask = diff > threshold
-        output = np.array(self.data)
-        output[mask] = rm_np[mask]
-        return list(output)
-    
-    def fill_nan(self,list_in):
-        dat = np.array(list_in)
-        mask = dat == np.nan
-        median = np.nanmedian(dat)
-        dat[mask] = median
-        return list(dat)
-
-    def arima_model(self,dates,values):
-        if len(values) == 0:
-            return [],[],[]
-        pdf = pd.DataFrame(values)
-        pdf.index = pd.to_datetime(dates)
-        result = seasonal_decompose(pdf, model='multiplicative',two_sided=False)
-        trend =  result.trend[0].tolist()
-        resid = result.resid[0].tolist()
-        seasonal = result.seasonal[0].tolist()
-        """
-        testing code for parameter tuning
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
-        from matplotlib import pyplot as plt
-        train = pdf.ix[0:365,0]
-        test = pdf.ix[365:,0]
-        sarima_model = SARIMAX(train, order=(0, 1, 2,4,8,16), seasonal_order=(0, 1, 2, 12,52), enforce_invertibility=False, enforce_stationarity=False)
-        sarima_fit = sarima_model.fit()
-
-        sarima_pred = sarima_fit.get_prediction(test.index[0], test.index[-1])
-        predicted_means = sarima_pred.predicted_mean #+ test.rolling(12).mean().dropna().values
-        predicted_intervals = sarima_pred.conf_int(alpha=0.25)
-        lower_bounds = predicted_intervals['lower y']# + df.data.iloc[365:,0].rolling(12).mean().dropna().values
-        upper_bounds = predicted_intervals['upper y']# + df.data.iloc[365:,0].rolling(12).mean().dropna().values
-
-        sarima_rmse = np.sqrt(np.mean(np.square(test.values - sarima_pred.predicted_mean.values)))
-
-        fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(pdf.index, pdf.values)
-        ax.plot(test.index, test.values)# + pdf.iloc[365:,0].rolling(12).mean().dropna().values, label='truth')
-        ax.plot(test.index, predicted_means, color='#ff7823', linestyle='--', label="prediction (RMSE={:0.2f})".format(sarima_rmse))
-        ax.fill_between(test.index, lower_bounds, upper_bounds, color='#ff7823', alpha=0.3, label="confidence interval (95%)")
-        ax.legend();
-        ax.set_title("SARIMA");
-        plt.show()
-        sys.exit()
-        """
-        #result.plot()
-        #pyplot.show()
-        return trend,resid,seasonal
-    
-    def show(self):
-        if self.end_dt is None:
-            print "No data in series!"
-            return
-        n_days = (self.end_dt - self.start_dt).days + 1
-        dates = list((self.start_dt + datetime.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days))
-        print "%12s %12s %6s %6s" % ("   DATE   ","  Value  "," Missing "," Invalid ")
-        missing = self.missing
-        for i in range(n_days):
-            print "%12s %12f %6s" % (dates[i],self.data[i],missing[i])
-
-            
-
-
-        
 class AggScheme():
     def __init__(self):
         self.scheme = {"name":"Null",
@@ -608,8 +481,24 @@ class AggScheme():
                 else:
                     gdict = {"group_name":group_name,"group_pages":final_pages,"group_master":group_master}
                     self.scheme["groups"].append(gdict) 
-                    
 
+    def get_selfagg(self):
+        #scheme for self-aggregation for normalizing pre-aggregated data
+        #bad workaround to get around the awkward series_aggregation function
+        sagg = AggScheme()
+        for gdict in self.scheme["groups"]:
+            gname = gdict["group_name"]
+            master = gdict["group_master"]
+            gdict = {"group_name":gname,"group_pages":[gname,],"group_master":master}
+            sagg.scheme["groups"].append(gdict)
+        n_series = len(sagg.scheme["groups"])
+        sagg.weight_matrix = np.ones((n_series,n_series))
+        sagg.w_p2r = self.w_p2r
+        sagg.w_r2p = self.w_r2p
+        sagg.w_g2c = self.w_g2c
+        sagg.w_c2g = self.w_c2g
+        return sagg
+        
     def show(self,full=False,slug_lookup=None):
         scheme_name = self.scheme["name"]
         n_groups = len(self.scheme["groups"])
@@ -734,7 +623,7 @@ class AggFunc():
         Test each individual series in each aggregation group agains the group total
         check for values above three cutoffs: 1) more than (cutoff) of daily 
         agg total, 2) more than (sigcut) stddev above timeseries values, 3) more than (hardcut) absvalue
-        returns a new array with flagged data points set to series medians
+        returns a new array with flagged data points set to daily max
         """
         print "Performing Spike Detection"
         raw_data = tsa.arrays[source_array]
@@ -748,30 +637,36 @@ class AggFunc():
             gmaster = gdict["group_master"]
             group_pages = gdict["group_pages"]
             gindex = list(tsa.p2r[pindex] for pindex in group_pages if pindex in tsa.p2r)
+            #don't sum rows with all NaN
+            gindex = list(gi for gi in gindex if np.nansum(np.isnan(raw_data[gi])) < raw_data.shape[1])
+            if len(gindex) == 0:
+                continue
             agg_ts = raw_data[gindex,:]
             daily_totals = np.nansum(agg_ts,axis=0)
             series_medians = np.nanmedian(agg_ts,axis=1)
             #exclude max point for mean/std calculation
             series_top = np.nanmax(agg_ts,axis=1)
-            mask = np.equal(agg_ts,series_top[:,None])
-            to_check = agg_ts.copy()
-            to_check[mask] = np.nan
-            series_means = np.nanmean(to_check,axis=1)
-            series_std = np.nanstd(to_check,axis=1)
-            series_max = sigcut*series_std+series_means
-            daily_max = np.nanmax(agg_ts,axis=0) * cutoff
-            horiz_spike = np.greater(agg_ts,series_max[:,None])
+            row_sums = np.subtract(np.nansum(agg_ts,axis=1),series_top)
+            series_tsq = np.multiply(series_top,series_top)
+            row_ssums = np.subtract(np.nansum(np.multiply(agg_ts,agg_ts),axis=1),series_tsq)
+            series_means = row_sums/tsa.n_days
+            series_var = np.subtract(row_ssums/tsa.n_days,np.multiply(series_means,series_means))
+            series_std = np.sqrt(series_var)
+            #set cutoffs
+            series_sd_max = sigcut*series_std+series_means
+            daily_max = daily_totals * cutoff
+            #flag points
+            horiz_spike = np.greater(agg_ts,series_sd_max[:,None])
             vert_spike = np.greater(agg_ts,daily_max[None,:])
             hard_cut = agg_ts > hardcut
+            #all cutoffs must be exceeded to be flagged outlier
             total_spike = np.logical_and(horiz_spike,np.logical_and(vert_spike,hard_cut))
             spike_index = np.nonzero(total_spike)
             si_pairs = zip(list(spike_index[0]),list(spike_index[1]))
-            for ri,ci in si_pairs: #one at a time?  Slow!  Fix!!
+            for ri,ci in si_pairs: #one at a time? 
                 #convert sub array row index back to master index
-                pindex = group_pages[ri]
-                master_index = tsa.p2r[pindex]
-                outlier_subs[master_index,ci] = series_medians[ri]
-                #print "   clipping series %6g on %11s from %7g to %7g" % (plist[ri],date_str[ci],agg_ts[ri,ci],daily_max[ci])
+                original_index = gindex[ri]
+                outlier_subs[original_index,ci] = daily_max[ci]
         print "   flagged %g out of %g points as outliers" % (np.count_nonzero(outlier_subs),outlier_subs.shape[0]*outlier_subs.shape[1])
         np.seterr(all='warn')
         return outlier_subs
@@ -782,17 +677,14 @@ class AggFunc():
         print "Performing Series Aggregation"
         raw_data = tsa.arrays[source_array]
         agg_data = {}
-        if w_scheme is not None:
+        if w_scheme in ["inv","cos"]:
             if w_scheme == "inv":
                 weights = agg_scheme.weight_matrix_simple.copy()
             elif w_scheme == "cos":
                 weights = agg_scheme.weight_matrix.copy()
-            else:
-                print "Invalid weight scheme!",w_scheme
-                sys.exit()
             reindex = list(agg_scheme.w_p2r[tsa.r2p[i]] for i in range(raw_data.shape[0]))
             weights = weights[reindex] #reindex to be consistent
-        else:
+        else: #use simple summation
             weights = np.ones(agg_scheme.weight_matrix.shape)
         if norm is not None:
             master_totals={}
@@ -838,33 +730,54 @@ class AggFunc():
             return agg_data
 
 
+    def truncate_dt2mo(self,tsa,extra=False):
+        #returns all 1st of months for all dates in tsa
+        #extra kwarg adds one extra month
+        dt_list=tsa.dt_list
+        ym_list = list((dt.year,dt.month) for dt in dt_list)
+        ym_list = list(set(ym_list))
+        ym_list.sort(key = lambda t:float(t[0])+0.01*float(t[1]))
+        if extra:
+            last_ym=ym_list[-1]
+            next_mo_n = last_ym[1] #incremented if zero-indexed
+            next_y = last_ym[0] + (next_mo_n//12) 
+            next_m = (next_mo_n % 12) + 1
+            ym_list.append((next_y,next_m))
+        ym_dt = list(datetime.datetime.strptime("%4g-%02g-01" % ym,"%Y-%m-%d") for ym in ym_list)
+        return ym_dt
+    
     def agg_by_month(self,tsa,source_array,agg_type=None):
         """
-        For the moment, try pandas grouping feature, return list of str(Month year) and list of data
-
+        Aggregate by Month
+        NB: pandas dependency removed!
         """
         dt_list = tsa.dt_list
-        pd_dates = pd.to_datetime(dt_list)
-        pdf = pd.DataFrame(pd_dates, columns=['date'])
-        data = tsa.arrays[source_array]
+        data = tsa.arrays[source_array]        
         agg_data={}
-        col_names = []
-        for ri,row in enumerate(data):
-            name = tsa.r2p[ri]
-            col_names.append(name)
-            pdf[name]=row
-        if agg_type == "mean":
-            by_month = pdf.groupby(pd.Grouper(key='date',freq='M')).mean()
-        elif agg_type == "median":
-            by_month = pdf.groupby(pd.Grouper(key='date',freq='M')).median()
-        else:
-            by_month = pdf.groupby(pd.Grouper(key='date',freq='M')).sum()
-        #by_month.index = by_month.index.strftime('%b-%Y')
-        mo_dt_list = list(dti.to_pydatetime() for dti in by_month.index)
-        for col in col_names:
-            agg_data[col] = (mo_dt_list,list(by_month[col]))
+        ym_dt = self.truncate_dt2mo(tsa,extra=True)
+        last_dt = ym_dt[-1]
+        by_month = []
+        output_months = []
+        for i in range(len(ym_dt)-1):
+            start = ym_dt[i]
+            end = ym_dt[i+1]
+            cols = list(tsa.d2c[dt] for dt in dt_list if dt >= start and dt < end)
+            if agg_type == "mean":
+                mo_agg = np.nanmean(data[:,cols],axis=1)
+            elif agg_type == "median":
+                mo_agg = np.nanmedian(data[:,cols],axis=1)
+            else:
+                mo_agg = np.nansum(data[:,cols],axis=1)
+            by_month.append(mo_agg)
+            output_months.append(start)
+        for i in range(data.shape[0]): #regroup by series from columns
+            name=tsa.r2p[i]
+            vals = list(mt[i] for mt in by_month)
+            agg_data[name] = (output_months,vals)
+        #for k,v in agg_data.iteritems():
+        #    print k,zip(list(dt.strftime("%y-%m") for dt in v[0]),v[1])
         return agg_data
-                            
+         
 
     def get_searchterm_counts(self,agg_scheme,db_session,target="clicks"):
         """
@@ -886,9 +799,9 @@ class AggFunc():
             scounts = list(tup[1] for tup in results)
             term_counts = {}
             #scan search string for words matching group names
-            #no accounting for variations or misspellings
+            #no accounting for variations or misspellings!
             for si,sterm in enumerate(sterms):
-                terms = set(sterm.split())
+                terms = set(list(term.strip().lower() for term in sterm.split()))
                 hits = []
                 for gterm in ugroup_names:
                     #some terms are composite, must match all words
@@ -912,84 +825,60 @@ class AggFunc():
         search_ts = {}
         for gname in ugroup_names:
             g_counts = list(search_counts[dt].get(gname,0.0) for dt in dt_list)
-            search_ts[gname] = [dt_list,g_counts]
+            search_ts[gname.upper()] = (dt_list,g_counts)
         return search_ts
 
-    def calc_scores(self,tsa,source_array,agg_scheme):
-        """
-        #calculates a "normalized" score for each group in dictionary
-        #where each series divided by the sum of all series and multiplied by 100
-        #agg_key is what value to aggregate
-        #dictionary is updated, no return values
-        """
-        master_groups = agg_scheme.masters.keys()
-        master_wi = (agg_scheme.w_g2c[gn] for gn in master_groups if gn != "MASTER")
-        data = tsa.arrays[source_array]
-        subscore_dict = {}
-        dt_list = tsa.dt_list
-        for mg,mc in zip(master_groups,master_wi):
-            gmask=agg_scheme.weight_matrix[:,mc] > 0.0
-            gindex = list(np.nonzero(gmask)[0])
-            gdata = data[gmask,:]
-            gsum = np.nansum(gdata,axis=0)
-            gnorm = np.divide(gdata,gsum[None,:])*100.0
-            for gi in gindex:
-                group_name=agg_scheme.c2g[gi]
-                group_val = list(gnorm[gi])
-                subscore_dict[group_name] = (dt_list,group_val)
-        grand_total=np.nansum(data,axis=0)
-        grand_norm = np.divide(data,grand_total[None,:])*100.0
-        score_dict={}
-        for gname,gi in tsa.p2r.iteritems():
-            group_val = list(grand_norm[gi])
-            score_dict[gname] = (dt_list,group_val)
-        return score_dict,subscore_dict
+    def update_tsa(self,proc,target_tsa,target_array,local=False,file=None):
+        target_rows = target_tsa.p2r.keys()
+        #is local requested and a filename given?
+        if local and file is not None:
+            tsa_in = TsArray.load_array(file)
+        #do the dates for the imported array match with existing?
+        #all or nothing, if any mismatch, all are fetched
+        if set(tsa_in.dt_list) == set(target_tsa.dt_list):
+            old_array = tsa_in.arrays.get(target_array,np.array([]))
+            if old_array.size > 0:
+                existing_rows = tsa_in.p2r.keys()
+                print "Copying %g rows of %s data from local file %s" % (len(existing_rows),target_array,file)
+                rows_tocopy = list(set(target_rows) & set(existing_rows))
+                missing_rows = list(set(target_rows) - set(rows_tocopy))
+                target_index = list(target_tsa.p2r[row] for row in rows_tocopy)
+                source_index = list(tsa_in.p2r[row] for row in rows_tocopy)
+                new_array = target_tsa.new_array()
+                new_array[target_index] = old_array[source_index]
+                target_tsa.add_array(new_array,target_array)
+            else:
+                missing_rows = target_rows
+            if len(missing_rows) > 0:
+                print "Adding %g rows for target %s" % (len(missing_rows),target_array)
+                toadd_dict = proc.get_all_bykey(target_array,missing_rows)
+                target_tsa.insert_by_dict(target_array,toadd_dict)
+        else:
+            print "No local data available for:",target_array
+            toadd_dict = proc.get_all_bykey(target_array,target_rows)
+            target_tsa.insert_by_dict(target_array,toadd_dict)
+        
 
-    def calculate_index_scores(self,master_data,agg_scheme,agg_val,agg_dstr,search_val,search_dstr,search_weight=0.5):
-        print "CALCULATING scores/subscores for view metric"
-        self.calc_scores(master_data,agg_scheme,agg_val,agg_dstr)
-        print "CALCULATING scores/subscores for search metric"
-        self.calc_scores(master_data,agg_scheme,search_val,search_dstr)
-        print "CALCULATING Index values with search weight:",search_weight
-        for gname,gdict in master_data.iteritems():
-            sdict = gdict["scores"]
-            agg_dstr = sdict[agg_val]["score_dstr"]
-            agg_score = sdict[agg_val]["score"]
-            agg_subscore = sdict[agg_val]["subscore"]
-            search_dstr = sdict[search_val]["score_dstr"]
-            search_score = sdict[search_val]["score"]
-            search_subscore = sdict[search_val]["subscore"]
-            common_dates = list(set(agg_dstr) & set(search_dstr))
-            only_pv = list(set(agg_dstr) - set(search_dstr))
-            only_pv.sort()
-            common_dates.sort()
-            common_agg_i = list(agg_dstr.index(dstr) for dstr in common_dates)
-            common_search_i = list(search_dstr.index(dstr) for dstr in common_dates)
-            only_pv_i = list(agg_dstr.index(dstr) for dstr in only_pv)
-            index_score_val = []
-            index_dstr = []
-            index_subscore_val = []
-            for di,date in enumerate(common_dates):
-                search_i = common_search_i[di]
-                pv_i = common_agg_i[di]
-                comp_score = search_weight*search_score[search_i] + (1.0 - search_weight)*agg_score[pv_i]
-                comp_subscore = search_weight*search_subscore[search_i] + (1.0 - search_weight)*agg_subscore[pv_i]
-                index_score_val.append(comp_score)
-                index_subscore_val.append(comp_subscore)
-                index_dstr.append(date)
-            for di,date in enumerate(only_pv):
-                pv_i = only_pv_i[di]
-                comp_score = agg_score[pv_i]
-                comp_subscore = agg_subscore[pv_i]
-                index_score_val.append(comp_score)
-                index_subscore_val.append(comp_subscore)
-                index_dstr.append(date)
-            i_scores = zip(index_dstr,index_score_val)
-            i_subscores = zip(index_dstr,index_subscore_val)
-            i_scores.sort(key = lambda x:x[0])
-            i_subscores.sort(key = lambda x:x[0])
-            gdict["i_score"] = list(t[1] for t in i_scores)
-            gdict["i_subscore"] = list(t[1] for t in i_subscores)
-            gdict["score_dstr"] = list(t[0] for t in i_scores)
-            
-            
+    def get_search_data(self,db_session,agg_scheme,target_tsa,search_track,local=False,file=None):
+        #get local copy
+        if local and file is not None:
+            tsa_in = TsArray.load_array(file)
+        #check for matching dates
+        if set(tsa_in.dt_list) == set(target_tsa.dt_list):
+            array_in = tsa_in.arrays.get(search_track,None)
+            #check that search_term array exists
+            if array_in is not None:
+                #check if rows match
+                if set(tsa_in.p2r.keys()) == set(target_tsa.p2r.keys()):
+                    rows_tocopy = target_tsa.p2r.keys()
+                    target_index = list(target_tsa.p2r[row] for row in rows_tocopy)
+                    source_index = list(tsa_in.p2r[row] for row in rows_tocopy)
+                    new_array=target_tsa.new_array()
+                    new_array[target_index] = array_in[source_index]
+                    target_tsa.add_array(new_array,search_track)
+                    print "Copying search_term data from:",file
+                    return
+        #arrive here if any missing data
+        print "Fetching search_term data from database"
+        st_dict = self.get_searchterm_counts(agg_scheme,db_session,target=search_track)
+        target_tsa.insert_by_dict(search_track,st_dict)

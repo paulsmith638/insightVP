@@ -2,7 +2,6 @@ import sys,os,time,datetime,pickle,copy
 import numpy as np
 #local imports
 from vp_data import DataProc,TimeSeries,AggScheme,AggFunc,TsArray
-from pv_ingest import Ingest
 from pv_ingest import Utils
 from vp_plot import Plotter
 from vp_prop import vinepair_creds
@@ -12,12 +11,13 @@ from vp_prop import vinepair_creds
 #
 # Dates (format is YYYY-mm-dd) - inclusive
 # all dates are queried, selected range output
-# SINGLE_WINDOW = True/False, use the defined date range
-#   for all analysis and output or use all available data
-#   for analysis/weighting and only output the define range
-START_DATE="2017-01-01"
-END_DATE="2019-06-30"
-SINGLE_WINDOW = True
+# DATA_ dates are for the range to be analyzed
+# EXPORT_ dates are for the range to be plotted/exported
+DATA_START_DATE="2017-01-01"
+DATA_END_DATE="2019-11-01"
+EXPORT_START_DATE="2018-01-01"
+EXPORT_END_DATE="2019-11-01"
+
 #
 # Paths:
 # PATH to CSV for aggregation_scheme import
@@ -60,7 +60,10 @@ HARD_CUT = 5000
 USE_LOCAL_COPY = True
 
 # If plotting, give path to a valid chrome browser:
-CHROME_PATH = "/usr/lib64/chromium/chromium"
+#CHROME_PATH = "/usr/lib64/chromium/chromium"
+CHROME_PATH = "/opt/google/chrome/chrome"
+
+
 
 #    END OF USER INPUT (AUTOPILOT FROM HERE)
 ###################################################
@@ -70,16 +73,15 @@ CHROME_PATH = "/usr/lib64/chromium/chromium"
 
 #initialize 
 util = Utils()
-#ingest = Ingest()
 aggfunc = AggFunc()
 if os.path.isfile(CHROME_PATH):
     plotter = Plotter(CHROME_PATH)
 else:
-    print "Improper Chrome Path! Plotting disabled!"
-    plotter = None
+    print "Improper Chrome Path! Proceed at your own risk!"
+    plotter = Plotter(CHROME_PATH)
 dt = datetime.datetime
 creds = vinepair_creds()
-creds["load_cache"] = USE_LOCAL_COPY
+#creds["load_cache"] = USE_LOCAL_COPY
 #get processing/DB connection
 proc  = DataProc(**creds)
 proc.db_init()
@@ -97,17 +99,13 @@ all_ndays = len(all_dt)
 all_dstr = list(dt.strftime("%Y-%m-%d") for dt in all_dt)
 
 #dates 
-start_dt = dt.strptime(START_DATE,"%Y-%m-%d")
-end_dt = dt.strptime(END_DATE,"%Y-%m-%d")
+start_dt = dt.strptime(DATA_START_DATE,"%Y-%m-%d")
+end_dt = dt.strptime(DATA_END_DATE,"%Y-%m-%d")
 
-window_dt = list(dt for dt in all_dt if dt >= start_dt and dt <= end_dt)
-window_ndays = len(window_dt)
-window_dstr = list(dt.strftime("%Y-%m-%d") for dt in window_dt)
+all_dt = list(dt for dt in all_dt if dt >= start_dt and dt <= end_dt)
+all_ndays = len(all_dt)
+all_dstr = list(dt.strftime("%Y-%m-%d") for dt in all_dt)
 
-if SINGLE_WINDOW:
-    all_dt = window_dt
-    all_ndays = window_ndays
-    all_dstr = window_dstr
 
 #get aggregation scheme
 agg1 = AggScheme()
@@ -132,20 +130,6 @@ for gdict in agg1.scheme["groups"]:
     cg.append(gname)
     cat_group_lookup[master] = cg
     
-#get search_counts for all agg_scheme groups
-if "search_counts" in proc.data_cache.keys() and USE_LOCAL_COPY:
-    print "Loading search term data from cache"
-    search_counts = proc.data_cache["search_counts"]
-else:
-    search_counts = aggfunc.get_searchterm_counts(agg1,db_session,target=SEARCH_TRACK)
-
-if USE_LOCAL_COPY:
-    proc.data_cache["search_counts"] = search_counts
-    print "Saving data cache"
-    f = open("data_cache.pkl",'wb')
-    pickle.dump(proc.data_cache,f)
-    f.close()
-    
 #calculate page weights
 agg1.get_page_weights(proc)
 
@@ -157,7 +141,7 @@ tracked_pages = agg1.get_tracked_pages()
 #get all data in tsarray format
 #use local data if selected
 pv_data = TsArray(tracked_pages,all_dt)
-to_update = [PAGE_CATEGORY,]
+to_update = [PAGE_CATEGORY,SEARCH_TRACK]
 if SUBTRACT_SEV:
     to_update.append("scroll_events")
 if USE_LOCAL_COPY:
@@ -176,12 +160,18 @@ for update in to_update:
         target_array[target_index] = old_array[source_index]
         pv_data.add_array(target_array,update)
         if len(missing_pindex) > 0:
-            toadd_dict = proc.get_all_bykey(update,missing_pindex)
+            if update == SEARCH_TRACK:
+                toadd_dict = aggfunc.get_searchterm_counts(agg1,db_session,target=SEARCH_TRACK)
+            else:
+                toadd_dict = proc.get_all_bykey(update,missing_pindex)
             pv_data.insert_by_dict(update,toadd_dict)
 
     else:
+        if update == SEARCH_TRACK:
+            toadd_dict = aggfunc.get_searchterm_counts(agg1,db_session,target=SEARCH_TRACK)
+        else:
+            toadd_dict = proc.get_all_bykey(update,missing_pindex)
         print "No previous data available for",update
-        toadd_dict = proc.get_all_bykey(update,tracked_pages)
         pv_data.insert_by_dict(update,toadd_dict)
 
     
@@ -194,10 +184,10 @@ if SUBTRACT_SEV:
 else:
     pv_data.arrays["net_pv"] = pv_data.arrays[PAGE_CATEGORY]
 
+#save ts data as local pkl file
+if USE_LOCAL_COPY:
+    pv_data.store_array("pagedata")
 
-
-
-pv_data.store_array("pagedata")
 #TSA for aggregated categories
 agg_data = TsArray(group_cat_lookup.keys(),all_dt)
 
@@ -209,23 +199,20 @@ filt_array = pv_data.arrays["net_pv"].copy()
 filt_array[outlier_mask] = outlier_subs[outlier_mask]
 pv_data.add_array(outlier_subs,"outliers")
 pv_data.add_array(filt_array,"filt_pv")
+out_plist=plotter.get_outlier_plot(pv_data,"net_pv","outliers",name_lookup=pi2slug)
 agg_dict1 = aggfunc.agg_series(agg1,pv_data,"filt_pv",w_scheme="inv",norm=None)
 agg_dict2 = aggfunc.agg_series(agg1,pv_data,"filt_pv",w_scheme="inv",norm="all")
 agg_dict3 = aggfunc.agg_series(agg1,pv_data,"filt_pv",w_scheme="inv",norm="bygroup")
+agg_dict4 = aggfunc.agg_series(agg1,pv_data,SEARCH_TRACK,w_scheme="inv",norm=None)
 pv_agg = TsArray(agg_dict1.keys(),all_dt)
-#for ti,tdict in enumerate([agg_dict1,agg_dict2,agg_dict3]):
-#    for k,v in tdict.iteritems():
-#        print ti,k,v
 pv_agg.insert_by_dict("raw_agg",agg_dict1)
 pv_agg.insert_by_dict("scr_agg",agg_dict2)
 pv_agg.insert_by_dict("ssc_agg",agg_dict3)
+pv_agg.insert_by_dict("stc_agg",agg_dict4)
 mo_dict1=aggfunc.agg_by_month(pv_agg,"raw_agg",agg_type="median")
 mo_dict2=aggfunc.agg_by_month(pv_agg,"scr_agg",agg_type="median")
 mo_dict3=aggfunc.agg_by_month(pv_agg,"ssc_agg",agg_type="median")
-for k,v in mo_dict1.iteritems():
-    mo_dt_list = v[0]
-    break
-mo_dt_list.sort()
+mo_dt_list = aggfunc.truncate_dt2mo(pv_agg)
 mo_agg = TsArray(mo_dict1.keys(),mo_dt_list)
 #mo_agg.insert_by_dict("raw_mo",mo_dict1)
 mo_agg.insert_by_dict("scr_mo",mo_dict2)
@@ -238,138 +225,27 @@ mo_agg.show()
 
 panel_dlist = []
 
-top_10i = np.argsort(np.nansum(pv_data.arrays["scroll_events"],axis=1))[::-1][0:10]
-series_plot = list(pv_data.r2p[i] for i in top_10i)
-view_plot = pv_data.arrays.keys()
-#for series in series_plot:
-#    to_plot = list((frame,series) for frame in view_plot)
-#    plot_dict = plotter.tsarray_to_plot(pv_data,to_plot,str(series)+" : "+pi2slug.get(series,"Unk"))
-#    panel_dlist.append(plot_dict)
+for series in pv_agg.p2r.keys():
+    to_plot = list((frame,series) for frame in [SEARCH_TRACK,])#pv_agg.arrays.keys())
+    plot_dict = plotter.tsarray_to_plot(pv_agg,to_plot,str(series),start=EXPORT_START_DATE,end=EXPORT_END_DATE)
+    panel_dlist.append(plot_dict)
+fig1 = plotter.make_plot(panel_dlist,master_title="Aggregated Series")
+fig1.show()
+"""
+panel_dlist = []
+
 for series in mo_agg.p2r.keys():
     to_plot = list((frame,series) for frame in mo_agg.arrays.keys())
     plot_dict = plotter.tsarray_to_plot(mo_agg,to_plot,str(series))
     panel_dlist.append(plot_dict)
-fig1 = plotter.make_plot(panel_dlist,master_title="HOPE for the best!")
-fig1.show()
-sys.exit()
-
-for gdict in agg1.scheme["groups"]:
-    gname = gdict["group_name"]
-    gmaster = gdict["group_master"]
-    group_names.append(gname)
-    group_pages = gdict["group_pages"]
-    page_iweights = gdict["inv_weights"]
-    page_cweights = gdict["cos_weights"]
-    #raw data, unfiltered, no scroll events removed
-    gindex = list(pv_data.p2r[pindex] for pindex in group_pages)
-    raw_agg = np.nansum(pv_data.array[gindex,:],axis=0)
-    #aggregated data, filtered and scroll_events subtracted, returns numpy array of filtered values
-    agg_ts,agg_dates = aggfunc.agg_remove_spikes(proc,group_pages,PAGE_CATEGORY,cutoff=DAY_CUT,sigcut=SIG_CUT,
-                                                 hardcut=HARD_CUT)
-    #apply page weights to numpy array
-    w_ts = aggfunc.weight_pages(agg_ts,agg1,gname,weights="inv")
-    #actual aggregation, filtered but unweighted
-    agg_sum = list(np.nansum(agg_ts,axis=0))
-    #track scroll events
-    ev_agg_val,ev_agg_dates = proc.aggregate_by_plist(group_pages,"scroll_events")
-    ev_agg_dstr = list(dt.strftime("%Y-%m-%d") for dt in ev_agg_dates)
-    #weighted aggregation
-    w_sum = list(np.nansum(w_ts,axis=0))
-    #date strings for weighted and unweighted totals
-    agg_date_str =  list(dt.strftime("%Y-%m-%d") for dt in agg_dates)
-    #aggregate by month
-    month_dates,month_agg = aggfunc.agg_by_month(w_sum,agg_dates)
-    monthly_lists.append(month_agg)
-    #get search term totals
-    search_dates,search_val = search_counts.get(gname.lower().strip(),([],[]))
-    search_dstr = list(dt.strftime("%Y-%m-%d") for dt in search_dates)
-    master_data[gname] = {"group_master":gmaster,
-                          "raw_agg":raw_agg,"raw_dstr":raw_agg_dstr,
-                          "filt_agg":agg_sum,"agg_dstr":agg_date_str,
-                          "w_agg":w_sum,
-                          "mo_dates":month_dates,"mo_agg":month_agg,
-                          "ev_agg_dstr":ev_agg_dstr,"ev_agg_val":ev_agg_val,
-                          "search_dstr":search_dstr,"search_val":search_val}
-
-
-aggfunc.calculate_index_scores(master_data,agg1,"w_agg","agg_dstr","search_val","search_dstr",search_weight=SEARCH_WEIGHT)
-    
-# for debugging, save master_data for quick reload
-#f = open("master_data.pkl",'wb')
-#pickle.dump(master_data,f)
-#f.close()
-
-#aggregate by month here?
-for gname,gdict in master_data.iteritems():
-    dt_list = list(dt.strptime(date,"%Y-%m-%d") for date in gdict["score_dstr"])
-    month_dstr,month_score = aggfunc.agg_by_month(gdict["i_score"],dt_list)
-    month_dstr,month_subscore = aggfunc.agg_by_month(gdict["i_subscore"],dt_list)
-    gdict["mo_i_dstr"] = month_dstr
-    gdict["mo_i_score"] = month_score
-    gdict["mo_i_subscore"] = month_subscore
-
-#generate plots    
-panel_dlist = []
-for gname,gdict in master_data.iteritems():
-    master = gdict["group_master"]
-    #if master.upper() != "WINE":
-    #    continue
-    pdict = {}
-    pdict["name"] = gname
-    slist = []
-    sdict1 = {"name":gname+"_score","dstr":gdict["score_dstr"],"val":gdict["i_score"]}
-    sdict2 = {"name":gname+"_subscore","dstr":gdict["score_dstr"],"val":gdict["i_subscore"]}
-    slist.append(sdict1)
-    slist.append(sdict2)
-    pdict["series"] = slist
-    panel_dlist.append(pdict)
-
-fig = plotter.make_plot(panel_dlist,master_title="SCORES/SUBSCORES for WINE by Cat")
-fig.show(renderer="chrome")
-
-panel_dlist = []
+fig2 = plotter.make_plot(panel_dlist,master_title="Aggregation by Month")
+fig2.show()
+"""
 for ci,cat in enumerate(master_cats):
-    panel_score_slist = []
-    panel_subscore_slist = []
-    mo_dates = []
-    mo_scores = []
-    mo_subscores = []
-    cat_gnames = []
-    for gname,gdict in master_data.iteritems():
-        if gdict["group_master"] == cat:
-            sdict1 = {"name":gname+"_score","dstr":gdict["mo_i_dstr"],"val":gdict["mo_i_score"]}
-            sdict2 = {"name":gname+"_subscore","dstr":gdict["mo_i_dstr"],"val":gdict["mo_i_subscore"]}
-            panel_score_slist.append(sdict1)
-            panel_subscore_slist.append(sdict2)
-            mo_dates.append(gdict["mo_i_dstr"])
-            mo_scores.append(gdict["mo_i_score"])
-            mo_subscores.append(gdict["mo_i_subscore"])
-            cat_gnames.append(gname)
-    pdict1 = {}
-    pdict1["name"] = cat+"_scores"
-    pdict2 = {}
-    pdict2["name"] = cat+"_subscores"
-    pdict1["series"] = panel_score_slist
-    pdict2["series"] = panel_subscore_slist
-    panel_dlist.append(pdict1)
-    panel_dlist.append(pdict2)
     filename = JSON_OUTPUT+"_"+cat+"_scores.json"
-    util.ts2json(mo_scores,mo_dates,cat_gnames,output_file=filename)
+    util.ts2json(mo_agg,"scr_mo",output_file=filename,start=EXPORT_START_DATE,end=EXPORT_END_DATE)
     filename = JSON_OUTPUT+"_"+cat+"_subscores.json"
-    util.ts2json(mo_subscores,mo_dates,cat_gnames,output_file=filename)
-
-fig1 = plotter.make_plot(panel_dlist,master_title="SCORES/SUBSCORES by Cat")
-fig1.show(renderer="chrome")
-sys.exit()
-
-for ci,cat in enumerate(master_cats):
-    month_vals = None
-    filename = JSON_OUTPUT+"_"+cat+"_scores.json"
-    util.ts2json(month_vals,month_dates,group_names,output_file=filename)
-    filename = JSON_OUTPUT+"_"+cat+"_subscores.json"
-    util.ts2json(imo_vals,imo_dates,group_names,output_file=filename)
-
-
+    util.ts2json(mo_agg,"ssc_mo",output_file=filename,start=EXPORT_START_DATE,end=EXPORT_END_DATE)
 
 
 sys.exit()
